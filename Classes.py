@@ -30,6 +30,7 @@ from extractors.Forms import extract_forms, parse_form
 from extractors.Urls import extract_urls
 from extractors.Iframes import extract_iframes
 from extractors.Ui_forms import extract_ui_forms
+from selenium.webdriver.common.by import By
 
 
 import logging
@@ -229,37 +230,40 @@ class Form:
 
 
     class Element:
-        def __init__(self, itype, name, value):
+        def __init__(self, itype, accessible_name, name, value):
             self.itype =  itype
+            self.accessible_name = accessible_name
             self.name  =  name
             self.value =  value
         def __repr__(self):
-            return str( (self.itype, self.name, self.value) )
+            return str( (self.itype, self.accessible_name, self.name, self.value) )
         def __eq__(self, other):
-            return (self.itype == other.itype) and (self.name == other.name)
+            return (self.itype == other.itype) and (self.accessible_name == other.accessible_name)
         def __hash__(self):
-            return hash(hash(self.itype) + hash(self.name))
+            return hash(hash(self.itype) + hash(self.accessible_name))
 
     class SubmitElement:
-        def __init__(self, itype, name, value, use):
+        def __init__(self, itype, accessible_name, name, value, use):
             self.itype =  itype
+            self.accessible_name = accessible_name
             self.name  =  name
             self.value =  value
             # If many submit button are available, one must be picked.
             self.use   =  use
 
         def __repr__(self):
-            return str( (self.itype, self.name, self.value, self.use) )
+            return str( (self.itype, self.accessible_name, self.name, self.value, self.use) )
         def __eq__(self, other):
             return ((self.itype == other.itype) and
-                   (self.name == other.name) and
+                   (self.accessible_name == other.accessible_name) and
                    (self.use == other.use))
         def __hash__(self):
-            return hash(hash(self.itype) + hash(self.name) + hash(self.use))
+            return hash(hash(self.itype) + hash(self.accessible_name) + hash(self.use))
 
     class RadioElement:
-        def __init__(self, itype, name, value):
+        def __init__(self, itype, accessible_name, name, value):
             self.itype   = itype
+            self.accessible_name = accessible_name
             self.name    = name
             self.value   = value
             # Click is used when filling out the form
@@ -267,18 +271,19 @@ class Form:
             # User for fuzzing
             self.override_value = ""
         def __repr__(self):
-            return str( (self.itype, self.name, self.value, self.override_value) )
+            return str( (self.itype, self.accessible_name, self.name, self.value, self.override_value) )
         def __eq__(self, other):
             p1 = (self.itype == other.itype)
-            p2 = (self.name  == other.name)
+            p2 = (self.accessible_name  == other.accessible_name)
             p3 = (self.value == other.value)
             return (p1 and p2 and p3)
         def __hash__(self):
-            return hash(hash(self.itype) + hash(self.name) + hash(self.value))
+            return hash(hash(self.itype) + hash(self.accessible_name) + hash(self.value))
 
     class SelectElement:
-        def __init__(self, itype, name):
+        def __init__(self, itype, accessible_name, name):
             self.itype     = itype
+            self.accessible_name = accessible_name
             self.name      = name
             self.options   = []
             self.selected  = None
@@ -286,74 +291,76 @@ class Form:
         def add_option(self, value):
             self.options.append( value )
         def __repr__(self):
-            return str( (self.itype, self.name, self.options, self.selected, self.override_value) )
+            return str( (self.itype, self.accessible_name, self.name, self.options, self.selected, self.override_value) )
         def __eq__(self, other):
-            return (self.itype == other.itype) and (self.name == other.name)
+            return (self.itype == other.itype) and (self.accessible_name == other.accessible_name)
         def __hash__(self):
-            return hash(hash(self.itype) + hash(self.name) )
+            return hash(hash(self.itype) + hash(self.accessible_name) )
 
     class CheckboxElement:
-        def __init__(self, itype, name, value, checked):
+        def __init__(self, itype, accessible_name, name, value, checked):
             self.itype   = itype
+            self.accessible_name = accessible_name
             self.name    = name
             self.value   = value
             self.checked = checked
             self.override_value = ""
         def __repr__(self):
-            return str( (self.itype, self.name, self.value, self.checked) )
+            return str( (self.itype, self.accessible_name, self.name, self.value, self.checked) )
         def __eq__(self, other):
-            return (self.itype == other.itype) and (self.name == other.name) and (self.checked == other.checked)
+            return (self.itype == other.itype) and (self.accessible_name == other.accessible_name) and (self.checked == other.checked)
         def __hash__(self):
-            return hash(hash(self.itype) + hash(self.name) + hash(self.checked))
+            return hash(hash(self.itype) + hash(self.accessible_name) + hash(self.checked))
 
     # <select>
-    def add_select(self, itype, name):
-        new_el = self.SelectElement(itype, name)
+    def add_select(self, itype, accessible_name, name):
+        new_el = self.SelectElement(itype, accessible_name, name)
         self.inputs[new_el] = new_el
         return self.inputs[new_el]
 
     # <input>
-    def add_input(self, itype, name, value, checked):
+    def add_input(self, itype, accessible_name, name, value, checked):
         if itype == "radio":
-            new_el = self.RadioElement(itype, name, value)
-            key    = self.RadioElement(itype, name, value)
+            new_el = self.RadioElement(itype, accessible_name, name, value)
+            key    = self.RadioElement(itype, accessible_name, name, value)
         elif itype == "checkbox":
-            new_el = self.CheckboxElement(itype, name, value, checked)
-            key    = self.CheckboxElement(itype, name, value, None)
+            new_el = self.CheckboxElement(itype, accessible_name, name, value, checked)
+            key    = self.CheckboxElement(itype, accessible_name, name, value, None)
         elif itype == "submit":
-            new_el = self.SubmitElement(itype, name, value, True)
-            key    = self.SubmitElement(itype, name, value, None)
+            new_el = self.SubmitElement(itype, accessible_name, name, value, True)
+            key    = self.SubmitElement(itype, accessible_name, name, value, None)
         else:
-            new_el = self.Element(itype, name, value)
-            key    = self.Element(itype, name, value)
+            new_el = self.Element(itype, accessible_name, name, value)
+            key    = self.Element(itype, accessible_name, name, value)
 
         self.inputs[key] = new_el
         return self.inputs[key]
 
     # <button>
-    def add_button(self, itype, name, value):
+    def add_button(self, itype, accessible_name, name, value):
         if itype == "submit":
-            new_el = self.SubmitElement(itype, name, value, True)
-            key    = self.SubmitElement(itype, name, value, None)
+            new_el = self.SubmitElement(itype, accessible_name, name, value, True)
+            key    = self.SubmitElement(itype, accessible_name, name, value, None)
         else:
-            logging.error("Unknown button " + str((itype,name,value)))
-            new_el = self.Element(itype, name, value)
-            key    = self.Element(itype, name, value)
+            # button
+            logging.error("Unknown button " + str((itype,accessible_name,name,value)))
+            new_el = self.Element(itype, accessible_name, name, value)
+            key    = self.Element(itype, accessible_name, name, value)
 
         self.inputs[key] = new_el
         return self.inputs[key]
 
 
     # <textarea>
-    def add_textarea(self, name, value):
+    def add_textarea(self, accessible_name, name, value):
         # Textarea functions close enough to a normal text element
-        new_el = self.Element("textarea", name, value)
+        new_el = self.Element("textarea", accessible_name, name, value)
         self.inputs[new_el] = new_el
         return self.inputs[new_el]
 
     # <iframe>
     def add_iframe_body(self, id):
-        new_el = self.Element("iframe", id, "")
+        new_el = self.Element("iframe", '', id, "")
         self.inputs[new_el] = new_el
         return self.inputs[new_el]
 
@@ -366,7 +373,7 @@ class Form:
 
     # For entire Form
     def __repr__(self):
-        s  = "Form("+str(len(self.inputs))+", " + str(self.action) + ", " + str(self.method) + ")"
+        s  = "Form("+str(self.inputs.keys())+", " + str(self.action) + ", " + str(self.method) + ")"
         return s
     def __eq__(self, other):
         return (    self.action == other.action
@@ -567,6 +574,22 @@ class Crawler:
                 #print(self.graph.toMathematica())
                 break
 
+        with open("network_traffic.log", "w", encoding="utf-8") as file:
+            for request in driver.requests:
+                if request.response:
+                    file.write("****************************************************\n")
+                    file.write(f"*****Request URL*****:\n{request.url}\n")
+                    file.write(f"*****Request Headers*****:\n{request.headers}\n")
+                    file.write(f"*****Response Status*****:\n{request.response.status_code}\n")
+                    file.write(f"*****Response Headers*****:\n{request.response.headers}\n")
+                    if (request.url.endswith(".js") or request.url.endswith(".css") or request.url.endswith(
+                            ".png") or request.url.endswith(".jpg") or request.url.endswith(
+                            ".jpeg") or request.url.endswith(".gif") or request.url.endswith(
+                            ".svg") or request.url.endswith(".ico")):
+                        file.write("\n")
+                        continue
+                    file.write(f"*****Response Body*****:\n{request.response.body.decode('utf-8', errors='ignore')}\n")
+                    file.write("\n")
         print("Done crawling, ready to attack!")
         self.attack()
 
@@ -657,18 +680,18 @@ class Crawler:
 
             try:
                 if  event.event == "oninput" or event.event == "input":
-                    el = driver.find_element_by_xpath(event.addr)
+                    el = driver.find_element(By.XPATH, event.addr)
                     el.clear()
                     el.send_keys(payload)
                     el.send_keys(Keys.RETURN)
-                    logging.info("oninput %s" %  driver.find_element_by_xpath(event.addr) )
+                    logging.info("oninput %s" %  driver.find_element(By.XPATH, event.addr) )
                 if  event.event == "oncompositionstart" or event.event == "compositionstart":
-                    el = driver.find_element_by_xpath(event.addr)
+                    el = driver.find_element(By.XPATH, event.addr)
                     el.click()
                     el.clear()
                     el.send_keys(payload)
                     el.send_keys(Keys.RETURN)
-                    logging.info("oncompositionstart %s" %  driver.find_element_by_xpath(event.addr) )
+                    logging.info("oncompositionstart %s" %  driver.find_element(By.XPATH, event.addr) )
 
                 else:
                     logging.error("Could not attack event.event %s" % event.event)
@@ -828,7 +851,7 @@ class Crawler:
         successful_xss = set()
 
         # attribute injections
-        attribute_injects = self.driver.find_elements_by_xpath("//*[@jaekpot-attribute]")
+        attribute_injects = self.driver.find_elements(By.XPATH, "//*[@jaekpot-attribute]")
         for attribute in attribute_injects:
             lookup_id = attribute.get_attribute("jaekpot-attribute")
             successful_xss.add(lookup_id)
@@ -942,7 +965,7 @@ class Crawler:
 
     def inspect_tracker(self, vector_edge):
         try:
-            body_text = self.driver.find_element_by_tag_name("body").text
+            body_text = self.driver.find_element(By.TAG_NAME, "body").text
 
             for tracker in self.io_graph:
                 if tracker in body_text:
@@ -1117,14 +1140,16 @@ class Crawler:
             print("Progress (forms): ", form_c , "/", len(forms_to_attack))
             if vector_type == "form":
                 form_xss = self.path_attack_form(driver, vector)
+                if form_xss:
+                    # Save to file
+                    f = open("form_xss.txt", "a+")
+                    for xss in form_xss:
+                        if xss in self.attack_lookup_table:
+                            f.write(str(self.attack_lookup_table)  + "\n")
 
-                # Save to file
-                f = open("form_xss.txt", "a+")
-                for xss in form_xss:
-                    if xss in self.attack_lookup_table:
-                        f.write(str(self.attack_lookup_table)  + "\n")
-
-                successful_xss = successful_xss.union(form_xss)
+                    successful_xss = successful_xss.union(form_xss)
+                else:
+                    logging.error("Failed to attack form " + str(vector))
             form_c += 1
 
 
@@ -1377,7 +1402,7 @@ class Crawler:
                 time.sleep(1)
         except UnexpectedAlertPresentException:
             logging.warning("Alert detected")
-            alert = driver.switch_to_alert()
+            alert = driver.switch_to.alert
             alert.dismiss()
 
             # Check if double check is needed...
@@ -1415,6 +1440,7 @@ class Crawler:
             try:
                 print("Logging in")
                 form_fill(driver, new_form)
+                time.sleep(2)
             except:
                 logging.warning("Failed to login to potiential login form")
 
@@ -1431,7 +1457,7 @@ class Crawler:
             wait_json = driver.execute_script("return JSON.stringify(need_to_wait)")
         except UnexpectedAlertPresentException:
             logging.warning("Alert detected")
-            alert = driver.switch_to_alert()
+            alert = driver.switch_to.alert
             alert.dismiss()
         wait_json = driver.execute_script("return JSON.stringify(need_to_wait)")
         wait = json.loads(wait_json)
@@ -1451,7 +1477,7 @@ class Crawler:
             else:
                 logging.info("Not allowed to add edge: %s" % new_edge)
 
-        logging.info("Adding requests from froms")
+        logging.info("Adding requests from forms")
         for form in forms:
             req = Request(form.action, form.method)
             logging.info("from forms %s " % str(req))
@@ -1501,7 +1527,7 @@ class Crawler:
 
         # Try to clean up alerts
         try:
-            alert = driver.switch_to_alert()
+            alert = driver.switch_to.alert
             alert.dismiss()
         except NoAlertPresentException:
             pass

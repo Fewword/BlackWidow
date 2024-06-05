@@ -1,5 +1,6 @@
-from selenium import webdriver
+from seleniumwire import webdriver
 from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 import json
 import pprint
@@ -24,11 +25,13 @@ WebDriver.add_script = add_script
 chrome_options = webdriver.ChromeOptions()
 chrome_options.add_argument("--disable-web-security")
 chrome_options.add_argument("--disable-xss-auditor")
+chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+chrome_options.add_argument('--ignore-certificate-errors')
 
 # launch Chrome
-driver = webdriver.Chrome(chrome_options = chrome_options)
-
-
+# 启动 WebDriver 并配置代理
+driver_service = Service()
+driver = webdriver.Chrome(service=driver_service, options = chrome_options)
 
 #driver.set_window_position(-1700,0)
 

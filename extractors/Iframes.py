@@ -4,6 +4,7 @@ from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, UnexpectedAlertPresentException, NoSuchFrameException, NoAlertPresentException, ElementNotVisibleException, InvalidElementStateException
 from urllib.parse import urlparse, urljoin
+from selenium.webdriver.common.by import By
 import json
 import pprint
 import datetime
@@ -23,7 +24,7 @@ import Classes
 def extract_iframes(driver):
     # Search for <iframe>
     iframes = set()
-    elem = driver.find_elements_by_tag_name("iframe")
+    elem = driver.find_elements(By.TAG_NAME, "iframe")
     for el in elem:
         try:
             src = None
@@ -32,7 +33,7 @@ def extract_iframes(driver):
             if el.get_attribute("src"):
                 src = el.get_attribute("src")
             if el.get_attribute("id"):
-                i = el.get_attribute("i")
+                i = el.get_attribute("id")
 
             iframes.add( Classes.Iframe(i, src) )
 
@@ -44,7 +45,7 @@ def extract_iframes(driver):
 
 
     # Search for <frame>
-    elem = driver.find_elements_by_tag_name("frame")
+    elem = driver.find_elements(By.TAG_NAME, "frame")
     for el in elem:
         try:
             src = None

@@ -1,0 +1,16 @@
+/venv/
+/logs/
+.idea/
+/attack_lookup_table.txt
+/bm_proxy_test
+/bmp.log
+/command.txt
+/extract_url.py
+/graph_mathematica.txt
+/network_traffic.log
+/queue.txt
+/run.flag
+/server.log
+/successful_xss.txt
+/sw_data
+/sw_proxy_test.py
