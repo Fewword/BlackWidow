@@ -14,3 +14,6 @@
 /successful_xss.txt
 /sw_data
 /sw_proxy_test.py
+/network_traffic.json
+/action_log.json
+/screenshots/
