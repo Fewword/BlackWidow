@@ -1,12 +1,14 @@
-from seleniumwire import webdriver
-from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.action_chains import ActionChains
+# from selenium.webdriver.remote.webdriver import WebDriver
+# from selenium.webdriver.chrome.service import Service
+# from selenium.webdriver.common.action_chains import ActionChains
+
 import json
 import pprint
 import argparse
 
 from Classes import *
+
+from seleniumwire import webdriver
 
 parser = argparse.ArgumentParser(description='Crawler')
 parser.add_argument("--debug", action='store_true',  help="Dont use path deconstruction and recon scan. Good for testing single URL")
@@ -30,8 +32,9 @@ chrome_options.add_argument('--ignore-certificate-errors')
 
 # launch Chrome
 # 启动 WebDriver 并配置代理
-driver_service = Service()
-driver = webdriver.Chrome(service=driver_service, options = chrome_options)
+# driver_service = Service()
+# driver = webdriver.Chrome(service=driver_service, options = chrome_options)
+driver = webdriver.Chrome(options = chrome_options)
 
 #driver.set_window_position(-1700,0)
 
