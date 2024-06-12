@@ -42,6 +42,10 @@ logging.basicConfig(filename=log_file,
 for v in logging.Logger.manager.loggerDict.values():
     v.disabled = True
 
+logging.getLogger('seleniumwire').setLevel(logging.WARNING)
+logging.getLogger('hpack').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+
 
 # This should be the main class for nodes in the graph
 # Should contain GET/POST, Form data, cookies,
@@ -541,7 +545,7 @@ class Crawler:
 
         # Don't submit same form too many times
         self.done_form = {}
-        self.max_done_form = 5
+        self.max_done_form = 1
 
         self.logger = NetworkTrafficLogger(driver)
 
@@ -635,7 +639,7 @@ class Crawler:
         self.logger.log_traffic()
 
         print("Done crawling, ready to attack!")
-        self.attack()
+        # self.attack()
 
     def extract_vectors(self):
         print("Extracting urls")
@@ -1291,7 +1295,7 @@ class Crawler:
                     logging.info("prev was form, ATTACK, " + str(prev_form))
                     # TODO should we skip attacking some elements?
                     self.path_attack_form(driver, prev_edge)
-                    if not prev_form in self.attacked_forms:
+                    if not (prev_form in self.attacked_forms):
                         self.attacked_forms[prev_form] = 0
                     self.attacked_forms[prev_form] += 1
 
@@ -1376,12 +1380,31 @@ class Crawler:
         graph.data['prev_edge'] = edge
 
         request = edge.n2.value
+        req = request
+        new_edge = edge
 
-        logging.info("Current url: " + driver.current_url)
-        logging.info("Crawl (edge): " + str(edge))
-        print("Crawl (edge): " + str(edge))
+        current_url = driver.current_url
+        if current_url != request.url:
+            req = Request(current_url, request.method)
+            logging.info("Changed url: " + current_url)
+            new_edge = graph.create_edge(edge.n1.value, req, CrawlEdge(edge.value.method, edge.value.method_data, edge.value.cookies), edge.parent)
+            if allow_edge(graph, new_edge):
+                graph.add(req)
+                graph.connect(edge.n1.value, req, CrawlEdge(edge.value.method, edge.value.method_data, edge.value.cookies), edge.parent)
+                logging.info("Crawl (edge): " + str(new_edge))
+                print("Crawl (edge): " + str(new_edge))
+                graph.visit_node(request)
+                graph.visit_edge(edge)
+            else:
+                logging.info("Not allowed to add edge: %s" % new_edge)
+                new_edge = edge
+                req = request
+        else:
+            logging.info("Current url: " + current_url)
+            logging.info("Crawl (edge): " + str(edge))
+            print("Crawl (edge): " + str(edge))
 
-        return (edge, request)
+        return (new_edge, req)
 
     # Actually not recursive (TODO change name)
     def rec_crawl(self):
@@ -1460,6 +1483,22 @@ class Crawler:
                 print("Logging in")
                 form_fill(driver, new_form)
                 time.sleep(2)
+                current_url = driver.current_url
+                if current_url != request.url:
+                    new_request = Request(current_url, request.method)
+                    logging.info("Changed url: " + current_url)
+                    new_edge = graph.create_edge(request, new_request, CrawlEdge("get", None, None), edge)
+                    if allow_edge(graph, new_edge):
+                        graph.add(new_request)
+                        graph.connect(request, new_request, CrawlEdge("get", None, None), edge)
+                        logging.info("Crawl (edge): " + str(new_edge))
+                        print("Crawl (edge): " + str(new_edge))
+                        edge = new_edge
+                        request = new_request
+                        graph.visit_node(request)
+                        graph.visit_edge(edge)
+                    else:
+                        logging.info("Not allowed to add edge: %s" % new_edge)
             except:
                 logging.warning("Failed to login to potiential login form")
 
@@ -1484,7 +1523,7 @@ class Crawler:
             time.sleep(1)
 
         # Add findings to the graph
-        current_cookies = driver.get_cookies()
+        current_cookies = driver.get_cookies() #bear
 
         logging.info("Adding requests from URLs")
         for req in reqs:

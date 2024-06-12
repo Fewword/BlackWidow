@@ -93,10 +93,12 @@ def find_state(driver, graph, edge):
         if allow_edge(graph, edge_in_path):
             if method == "get":
                 driver.get(edge_in_path.n2.value.url)
+                time.sleep(1)
             elif method == "form":
                 form = method_data
                 try:
                     form_fill(driver, form)
+                    time.sleep(1)
                 except Exception as e:
                     print(e)
                     print(traceback.format_exc())
@@ -210,6 +212,7 @@ def follow_edge(driver, graph, edge):
     method_data = edge.value.method_data
     if method == "get":
         driver.get(edge.n2.value.url)
+        time.sleep(1)
     elif method == "form":
         logging.info("Form, do find_state")
         if not find_state(driver, graph, edge):
@@ -318,7 +321,7 @@ def execute_event(driver, do):
     logging.info("We need to trigger [" +  do.event + "] on " + do.addr)
 
     do.addr = xpath_row_to_cell(do.addr)
-
+#retry?
     try:
         if   do.event == "onclick" or do.event == "click":
             web_element =  driver.find_element(By.XPATH, do.addr)
@@ -386,7 +389,11 @@ def execute_event(driver, do):
             logging.info("Composition Start %s" %  driver.find_element(By.XPATH, do.addr) )
 
         else:
-            logging.warning("Warning Unhandled event %s " % str(do.event) )
+            logging.warning("Warning Unhandled event %s " % str(do.event) ) # submit? load? reset? error?
+        # wait?
+    except NoSuchFrameException as e:
+        print("No such frame", do)
+        logging.error("No such frame " + str(do) )
     except Exception as e:
         print("Error", do)
         print(e)
@@ -441,7 +448,7 @@ def form_fill(driver, target_form):
         alert = driver.switch_to.alert
         alertText = alert.text
         logging.info("Removed alert: " +  alertText)
-        alert.accept();
+        alert.accept()
     except:
         logging.info("No alert removed (probably due to there not being any)")
         pass

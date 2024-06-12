@@ -27,8 +27,11 @@ WebDriver.add_script = add_script
 chrome_options = webdriver.ChromeOptions()
 chrome_options.add_argument("--disable-web-security")
 chrome_options.add_argument("--disable-xss-auditor")
+chrome_options.add_argument("--start-maximized")
+chrome_options.add_argument("--no-first-run")
 chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
 chrome_options.add_argument('--ignore-certificate-errors')
+# chrome_options.add_argument('--user-data-dir=./chrome_profile')
 
 # launch Chrome
 # 启动 WebDriver 并配置代理
