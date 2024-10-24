@@ -33,6 +33,7 @@ from extractors.Ui_forms import extract_ui_forms
 from selenium.webdriver.common.by import By
 
 import logging
+from openai import OpenAI
 
 log_file = os.path.join(os.getcwd(), 'logs', 'crawl-' + str(time.time()) + '.log')
 logging.basicConfig(filename=log_file,
@@ -479,6 +480,50 @@ class Ui_form:
         return hash(frozenset([source['xpath'] for source in self.sources]))
 
 
+class LLMManager:
+    def __init__(self, api_key, base_url, context=None):
+        self.api_key = api_key
+        self.context = context or []
+        self.base_url = base_url
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+
+    def add_to_context(self, message):
+        self.context.append(message)
+
+    def clear_context(self):
+        self.context = []
+
+    def generate_response(self, prompt):
+        system_prompt = """You are an assistant helping with form filling in a black-box testing tool. 
+        The user will provide the form input accessible name. Please generate the proper input content for the form and output them in JSON format.
+        EXAMPLE INPUT:
+        {
+            "accessible_name": "username",
+            "type": "text",
+        }
+        
+        EXAMPLE OUTPUT:
+        {
+            "value": "admin"
+        }"""
+
+        conversation = [{'role': 'system',
+                         'content': system_prompt}]
+        conversation += self.context
+        conversation.append({'role': 'user', 'content': prompt})
+
+        response = self.client.chat.completions.create(
+            model="deepseek-chat",
+            messages=conversation,
+            response_format={
+                'type': 'json_object'
+            }
+        )
+
+        answer = response.choices[0].message.content
+        self.add_to_context({'role': 'assistant', 'content': answer})
+        return answer
+
 class NetworkTrafficLogger:
     def __init__(self, driver):
         self.driver = driver
@@ -498,6 +543,7 @@ class NetworkTrafficLogger:
                 request_data = {
                     "request_url": url,
                     "request_headers": dict(request.headers),
+                    "request_body": request.body.decode('utf-8', errors='ignore'),
                     "response_status": request.response.status_code,
                     "response_headers": dict(request.response.headers),
                 }
@@ -548,6 +594,8 @@ class Crawler:
         self.max_done_form = 1
 
         self.logger = NetworkTrafficLogger(driver)
+
+        self.llm_manager = LLMManager(os.environ.get("API_KEY"), os.environ.get("BASE_URL"))
 
         logging.info("Init crawl on " + url)
 
@@ -611,7 +659,7 @@ class Crawler:
                             n_events += 1
                 print()
                 print("----------------------")
-                print("GETS    | FROMS  | EVENTS ")
+                print("GETS    | FORMS  | EVENTS ")
                 print(str(n_gets).ljust(7), "|", str(n_forms).ljust(6), "|", n_events)
                 print("----------------------")
 
@@ -1410,6 +1458,7 @@ class Crawler:
     def rec_crawl(self):
         driver = self.driver
         graph = self.graph
+        llm_manager = self.llm_manager
 
         todo = self.load_page(driver, graph)
         if not todo:
@@ -1472,40 +1521,10 @@ class Crawler:
         except:
             logging.warning("No timeouts from stringify")
 
-        early_state = self.early_gets < self.max_early_gets
-        login_form = find_login_form(driver, graph, early_state)
-
-        if login_form:
-            logging.info("Found login form")
-            print("We want to test edge: ", edge)
-            new_form = set_form_values(set([login_form])).pop()
-            try:
-                print("Logging in")
-                form_fill(driver, new_form)
-                time.sleep(2)
-                current_url = driver.current_url
-                if current_url != request.url:
-                    new_request = Request(current_url, request.method)
-                    logging.info("Changed url: " + current_url)
-                    new_edge = graph.create_edge(request, new_request, CrawlEdge("get", None, None), edge)
-                    if allow_edge(graph, new_edge):
-                        graph.add(new_request)
-                        graph.connect(request, new_request, CrawlEdge("get", None, None), edge)
-                        logging.info("Crawl (edge): " + str(new_edge))
-                        print("Crawl (edge): " + str(new_edge))
-                        edge = new_edge
-                        request = new_request
-                        graph.visit_node(request)
-                        graph.visit_edge(edge)
-                    else:
-                        logging.info("Not allowed to add edge: %s" % new_edge)
-            except:
-                logging.warning("Failed to login to potiential login form")
-
         # Extract urls, forms, elements, iframe etc
         reqs = extract_urls(driver)
         forms = extract_forms(driver)
-        forms = set_form_values(forms)
+        forms = set_form_values(forms, llm_manager)
         ui_forms = extract_ui_forms(driver)
         events = extract_events(driver)
         iframes = extract_iframes(driver)
@@ -1582,6 +1601,36 @@ class Crawler:
             else:
                 logging.info("Not allowed to add edge: %s" % new_edge)
 
+        early_state = self.early_gets < self.max_early_gets
+        login_form = find_login_form(driver, graph, early_state)
+
+        if login_form:
+            logging.info("Found login form")
+            print("We want to test edge: ", edge)
+            new_form = set_form_values(set([login_form]), llm_manager).pop()
+            try:
+                print("Logging in")
+                form_fill(driver, new_form)
+                time.sleep(2)
+                current_url = driver.current_url
+                if current_url != request.url:
+                    new_request = Request(current_url, request.method)
+                    logging.info("Changed url: " + current_url)
+                    new_edge = graph.create_edge(request, new_request, CrawlEdge("get", None, None), edge)
+                    if allow_edge(graph, new_edge):
+                        graph.add(new_request)
+                        graph.connect(request, new_request, CrawlEdge("get", None, None), edge)
+                        logging.info("Crawl (edge): " + str(new_edge))
+                        print("Crawl (edge): " + str(new_edge))
+                        edge = new_edge
+                        request = new_request
+                        graph.visit_node(request)
+                        graph.visit_edge(edge)
+                    else:
+                        logging.info("Not allowed to add edge: %s" % new_edge)
+            except:
+                logging.warning("Failed to login to potiential login form")
+
         # Try to clean up alerts
         try:
             alert = driver.switch_to.alert
@@ -1590,9 +1639,9 @@ class Crawler:
             pass
 
         # Check for successful attacks
-        time.sleep(0.1)
-        self.inspect_attack(edge)
-        self.inspect_tracker(edge)
+        # time.sleep(0.1)
+        # self.inspect_attack(edge)
+        # self.inspect_tracker(edge)
 
         if "3" in open("run.flag", "r").read():
             logging.info("Run set to 3, pause each step")

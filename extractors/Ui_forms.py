@@ -34,7 +34,7 @@ def extract_ui_forms(driver):
                 in_form = toggle.find_elements(By.XPATH, ".//ancestor::form")
                 if not in_form:
                     xpath = driver.execute_script("return getXPath(arguments[0])", toggle)
-                    sources.append( {'xpath': xpath, 'value': 'jAEkPotUI'} )
+                    sources.append( {'xpath': xpath, 'value': 'FEWWORDSUI'} )
         except:
             logging.warning("UI form error")
 
@@ -44,7 +44,7 @@ def extract_ui_forms(driver):
             in_form = toggle.find_elements(By.XPATH, ".//ancestor::form")
             if not in_form:
                 xpath = driver.execute_script("return getXPath(arguments[0])", toggle)
-                sources.append( {'xpath': xpath, 'value': 'jAEkPotUI'} )
+                sources.append( {'xpath': xpath, 'value': 'FEWWORDSUI'} )
         except:
             logging.warning("UI form error")
 

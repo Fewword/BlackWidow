@@ -5,6 +5,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, UnexpectedAlertPresentException, NoSuchFrameException, NoAlertPresentException, ElementNotVisibleException, InvalidElementStateException
 from urllib.parse import urlparse, urljoin
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 import json
 import pprint
 import datetime
@@ -62,8 +63,8 @@ def parse_form(el, driver):
         # print(js_forms)
         for js_form in js_forms:
             current_form = Classes.Form()
-            current_form.method = js_form['method'];
-            current_form.action = js_form['action'];
+            current_form.method = js_form['method']
+            current_form.action = js_form['action']
             logging.info("Found js form: " + str(current_form) )
 
 
@@ -89,6 +90,15 @@ def parse_form(el, driver):
                 tmp['value'] = iel.get_attribute("value")
             if iel.get_attribute("checked"):
                 tmp['checked'] = True
+            if iel.aria_role and iel.aria_role == "combobox":
+                # tmp['type'] = "combobox"
+                # 等待下拉列表加载
+                iel.click()
+                time.sleep(1)
+                driver.switch_to.active_element.send_keys(Keys.ENTER)
+
+                text = driver.find_element(By.CLASS_NAME, "ant-select-selection-item").text
+                tmp['value'] = text
 
         except StaleElementReferenceException as e:
             print("Stale pasta in from action")

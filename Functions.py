@@ -6,7 +6,9 @@ from selenium.webdriver.support.select import Select
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, UnexpectedAlertPresentException, NoSuchFrameException, NoAlertPresentException, ElementNotVisibleException, InvalidElementStateException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, \
+    UnexpectedAlertPresentException, NoSuchFrameException, NoAlertPresentException, ElementNotVisibleException, \
+    InvalidElementStateException, NoSuchElementException
 from urllib.parse import urlparse, urljoin
 from selenium.webdriver.common.by import By
 import json
@@ -372,31 +374,34 @@ def execute_event(driver, do):
                 # If ot a <select> we try to write
                 el = driver.find_element(By.XPATH, do.addr)
                 el.clear()
-                el.send_keys("jAEkPot")
+                el.send_keys("FEWWORDS")
                 el.send_keys(Keys.RETURN)
         elif  do.event == "input" or do.event == "oninput":
             el = driver.find_element(By.XPATH, do.addr)
             el.clear()
-            el.send_keys("jAEkPot")
+            el.send_keys("FEWWORDS")
             el.send_keys(Keys.RETURN)
             logging.info("oninput %s" %  driver.find_element(By.XPATH, do.addr) )
 
         elif  do.event == "compositionstart":
             el = driver.find_element(By.XPATH, do.addr)
             el.clear()
-            el.send_keys("jAEkPot")
+            el.send_keys("FEWWORDS")
             el.send_keys(Keys.RETURN)
             logging.info("Composition Start %s" %  driver.find_element(By.XPATH, do.addr) )
 
         else:
-            logging.warning("Warning Unhandled event %s " % str(do.event) ) # submit? load? reset? error?
+            logging.warning("Warning Unhandled event %s " % str(do.event) ) # submit? load? reset? error? 'transitionstart'？
         # wait?
     except NoSuchFrameException as e:
         print("No such frame", do)
         logging.error("No such frame " + str(do) )
+    except NoSuchElementException as e:
+        print("No such element", do)
+        logging.error("No such element " + str(do) )
     except Exception as e:
         print("Error", do)
-        print(e)
+        print(e.msg)
 
 
 
@@ -406,7 +411,7 @@ def form_fill_file(filename):
     dirname = os.path.dirname(__file__)
     path = os.path.join(dirname, 'form_files', filename)
 
-    if filename != "jaekpot.jpg":
+    if filename != "FEWWORDS.jpg":
         path = os.path.join(dirname, 'form_files', 'dynamic', filename)
         dynamic_file = open(path, "w+")
         # Could it be worth to add a file content payload?
@@ -471,8 +476,8 @@ def form_fill(driver, target_form):
             js_forms = json.loads(resps)
             for js_form in js_forms:
                 current_form = Classes.Form()
-                current_form.method = js_form['method'];
-                current_form.action = js_form['action'];
+                current_form.method = js_form['method']
+                current_form.action = js_form['action']
 
                 # TODO Need better COMPARE!
                 if( current_form.action == target_form.action and current_form.method ==  target_form.method ):
@@ -759,13 +764,13 @@ def ui_form_fill(driver, target_form):
     submit_element =  driver.find_element(By.XPATH, target_form.submit)
     submit_element.click()
 
-def set_standard_values(old_form):
+def set_standard_values(old_form, llm_manager):
     form = copy.deepcopy(old_form)
     first_radio = True
 
     for form_el in form.inputs.values():
         if form_el.itype == "file":
-            form_el.value = "jaekpot.jpg"
+            form_el.value = "FEWWORDS.jpg"
         elif form_el.itype == "radio":
             if first_radio:
                 form_el.click = True
@@ -782,31 +787,38 @@ def set_standard_values(old_form):
             else:
                 logging.warning( str(form_el) + " has no options" )
         elif form_el.itype == "text":
-            if form_el.value and form_el.value.isdigit():
-                form_el.value = 1
-            elif form_el.name == "email":
-                form_el.value = "user1@test.com"
-            else:
-                form_el.value = "user1@test.com"
+            if form_el.value == None:
+                if form_el.value and form_el.value.isdigit():
+                    form_el.value = 1
+                elif form_el.name == "email": # to_lower
+                    form_el.value = "user1@test.com"
+                else:# if value is none
+                    form_el.value = "user1@test.com"
         elif form_el.itype == "textarea":
-            form_el.value = "jAEkPot"
+            if form_el.value == None:
+                prompt = f"""{{
+                    "accessible_name": {form_el.accessible_name},
+                    "type": "textarea",
+                }}"""
+                generated_data = llm_manager.generate_response(prompt)
+                json_data = json.loads(generated_data)
+                form_el.value = json_data.get('value', 'No value found')
         elif form_el.itype == "email":
             form_el.value = "user1@test.com"
         elif form_el.itype == "hidden":
             pass
         elif form_el.itype == "password":
             form_el.value = "user1Test@"
-            #form_el.value = "jAEkPot1"
         elif form_el.itype == "number":
             # TODO Look at min/max/step/maxlength to pick valid numbers
             form_el.value = "1"
         elif form_el.itype == "iframe":
-            form_el.value = "jAEkPot"
+            form_el.value = "FEWWORDS"
         elif form_el.itype == "button":
             pass
         else:
             logging.warning( str(form_el) + " was handled by default")
-            form_el.value = "jAEkPot"
+            form_el.value = "FEWWORDS"
 
     return form
 
@@ -843,13 +855,13 @@ def set_checkboxes(forms):
                 new_forms.add(new_form)
     return new_forms
 
-def set_form_values(forms):
+def set_form_values(forms, llm_manager):
     logging.info("set_form_values got " + str(len(forms)))
     new_forms = set()
     # Set values for forms.
     # Could also create copies of forms to test different values
     for old_form in forms:
-        new_forms.add( set_standard_values(old_form) )
+        new_forms.add( set_standard_values(old_form, llm_manager) )
 
     # Handle submits
     new_forms = set_submits(new_forms)
