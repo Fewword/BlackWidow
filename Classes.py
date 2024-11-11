@@ -224,7 +224,39 @@ class Form:
         self.action = None
         self.method = None
         self.inputs = {}
+        self.a_tags = {}
+         # 新增验证码相关属性
+        self.captcha = {
+            'captcha_type': None, # 验证码类型
+            'captcha_img': None, # 验证码元素对象
+            'value': None         # 验证码的值(后续可能通过OCR或其他方式获取)
+        }
+        self.html = None
 
+    def set_html(self, html):
+        self.html = html
+
+    def set_capcha_captcha_type(self, captcha_type):
+        self.captcha['captcha_type'] = captcha_type
+        
+    def get_captcha_captcha_type(self):
+        return self.captcha['captcha_type']
+
+    def set_capcha_captcha_img(self, captcha_img):
+        self.captcha['captcha_img'] = captcha_img
+
+    def set_capcha_value(self, value):
+        self.captcha['value'] = value
+
+    def set_capcha_slide_location(self, x, y):
+        self.captcha['slide_location'] = (x, y)
+
+    def set_captcha(self, captcha_type, captcha_img, value):
+        """设置验证码相关信息"""
+        self.captcha['captcha_type'] = captcha_type
+        self.captcha['captcha_img'] = captcha_img
+        self.captcha['value'] = value
+        
     # Can we attack this form?
     def attackable(self):
         for input_el in self.inputs:
@@ -357,6 +389,7 @@ class Form:
         self.inputs[key] = new_el
         return self.inputs[key]
 
+
     # <button>
     def add_button(self, itype, accessible_name, name, value):
         if itype == "submit":
@@ -370,6 +403,10 @@ class Form:
 
         self.inputs[key] = new_el
         return self.inputs[key]
+
+    def add_a_tag(self, id_name, accessible_name):
+        self.a_tags[id_name] = accessible_name
+        return self.a_tags[id_name]
 
     # <textarea>
     def add_textarea(self, accessible_name, name, value):
@@ -1524,6 +1561,8 @@ class Crawler:
         # Extract urls, forms, elements, iframe etc
         reqs = extract_urls(driver)
         forms = extract_forms(driver)
+
+
         forms = set_form_values(forms, llm_manager)
         ui_forms = extract_ui_forms(driver)
         events = extract_events(driver)
@@ -1607,6 +1646,7 @@ class Crawler:
         if login_form:
             logging.info("Found login form")
             print("We want to test edge: ", edge)
+
             new_form = set_form_values(set([login_form]), llm_manager).pop()
             try:
                 print("Logging in")
