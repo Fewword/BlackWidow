@@ -21,6 +21,45 @@ import time
 
 import Classes
 
+def extract_dom_context(el, driver):
+    """辅助函数：提取DOM上下文（当前节点、父节点、兄弟节点、页面标题）"""
+    dom_context = {
+        "current_node": {
+            "tag_name": el.tag_name,
+            "attributes": el.get_attribute('outerHTML'),
+            "text": el.text,
+        },
+        "parent_node": {},
+        "sibling_nodes": [],
+        "page_title": driver.title
+    }
+
+    # 提取父节点信息
+    try:
+        parent = el.find_element(By.XPATH, '..')
+        dom_context["parent_node"] = {
+            "tag_name": parent.tag_name,
+            "attributes": parent.get_attribute('outerHTML'),
+            "text": parent.text
+        }
+    except:
+        dom_context["parent_node"] = {}
+
+    # 提取兄弟节点信息
+    try:
+        siblings = el.find_elements(By.XPATH, '../*')
+        for sibling in siblings:
+            if sibling != el:
+                dom_context["sibling_nodes"].append({
+                    "tag_name": sibling.tag_name,
+                    "attributes": sibling.get_attribute('outerHTML'),
+                    "text": sibling.text
+                })
+    except:
+        dom_context["sibling_nodes"] = []
+
+    return dom_context
+
 
 def parse_form(el, driver):
     form = Classes.Form()
@@ -93,12 +132,15 @@ def parse_form(el, driver):
             if iel.aria_role and iel.aria_role == "combobox":
                 # tmp['type'] = "combobox"
                 # 等待下拉列表加载
-                iel.click()
-                time.sleep(1)
-                driver.switch_to.active_element.send_keys(Keys.ENTER)
+                try:
+                    iel.click()
+                    time.sleep(1)
+                    driver.switch_to.active_element.send_keys(Keys.ENTER)
 
-                text = driver.find_element(By.CLASS_NAME, "ant-select-selection-item").text
-                tmp['value'] = text
+                    text = driver.find_element(By.CLASS_NAME, "ant-select-selection-item").text
+                    tmp['value'] = text
+                except Exception as e:
+                    logging.warning(f"Failed to extract value from combobox: {str(e)}")
 
         except StaleElementReferenceException as e:
             print("Stale pasta in from action")
@@ -177,8 +219,14 @@ def extract_forms(driver):
     elem = driver.find_elements(By.TAG_NAME, "form")
 
     forms = set()
+    form_contexts = {}
     for el in elem:
-        forms.add(parse_form(el, driver) )
-    return forms
+        form = parse_form(el, driver)
+        forms.add(form)
+        form_contexts[form] = {
+            "dom_context": extract_dom_context(el, driver),
+            "action_url": el.get_attribute("action") or driver.current_url
+        }
+    return forms, form_contexts
 
 

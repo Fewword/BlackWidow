@@ -79,6 +79,13 @@ function catch_properties(){
       elem = elems[my_counter_i]
       dom_adress = getXPath(elem);
       html_class = elems[my_counter_i].className;
+      var parent_html = elem.parentElement ? elem.parentElement.outerHTML : '';
+      var sibling_html = Array.from(elem.parentElement ? elem.parentElement.children : []).map(e => e.outerHTML).join();
+      var page_title = document.title;
+
+      console.log("parent_html: " + parent_html);
+      console.log("url: " + window.location.href);
+
       for (my_counter_j = 0; my_counter_j < events.length; my_counter_j++) {
         //function_id = MD5(events[my_counter_j].func.toString() )
         function_id = MD5(events[my_counter_j].func.toString() + dom_adress )
@@ -94,7 +101,14 @@ function catch_properties(){
           "id" : id,
           "tag" : tag,
           "addr" : dom_adress,
-          "class" : html_class
+          "class" : html_class,
+          "dom_context": {
+            "current_node": elem.outerHTML,
+            "parent_node": parent_html,
+            "sibling_nodes": sibling_html,
+            "page_title": page_title
+          },
+          "url": window.location.href
         }
         //resp = JSON.stringify(resp);
         resps.push(resp);

@@ -1,3 +1,5 @@
+from lib2to3.fixes.fix_input import context
+
 from selenium import webdriver
 from selenium.webdriver.support.select import Select
 from selenium.webdriver.remote.webdriver import WebDriver
@@ -17,13 +19,71 @@ import re
 import logging
 import copy
 import time
+import html2text
 
 import Classes
 
+def extract_dom_context_for_iframe(iframe_element, driver):
+    """提取IFRAME的DOM上下文，包括当前节点、父节点、兄弟节点等"""
+    dom_context = {
+        "current_node": {
+            "tag_name": iframe_element.tag_name,
+            "attributes": iframe_element.get_attribute('outerHTML'),
+            "text": iframe_element.text
+        },
+        "parent_node": {},
+        "sibling_nodes": [],
+        "page_title": driver.title
+    }
+
+    # 提取父节点信息
+    try:
+        parent = iframe_element.find_element(By.XPATH, '..')
+        dom_context["parent_node"] = {
+            "tag_name": parent.tag_name,
+            "attributes": parent.get_attribute('outerHTML'),
+            "text": parent.text
+        }
+    except:
+        dom_context["parent_node"] = {}
+
+    # 提取兄弟节点信息
+    try:
+        siblings = iframe_element.find_elements(By.XPATH, '../*')
+        for sibling in siblings:
+            if sibling != iframe_element:
+                dom_context["sibling_nodes"].append({
+                    "tag_name": sibling.tag_name,
+                    "attributes": sibling.get_attribute('outerHTML'),
+                    "text": sibling.text
+                })
+    except:
+        dom_context["sibling_nodes"] = []
+
+    # 切换到iframe内部，提取其内容
+    try:
+        driver.switch_to.frame(iframe_element)
+        text_maker = html2text.HTML2Text()
+        text_maker.ignore_links = True
+        iframe_content = text_maker.handle(driver.page_source)
+    except Exception as e:
+        logging.warning(f"Failed to extract content from iframe: {str(e)}")
+    finally:
+        # 返回主页面
+        driver.switch_to.default_content()
+
+    url = driver.current_url  # 获取操作URL
+    context = {
+        "dom_context": dom_context,
+        "iframe_content": iframe_content,
+        "url": url
+    }
+    return context
 
 def extract_iframes(driver):
     # Search for <iframe>
     iframes = set()
+    iframe_contexts = {}
     elem = driver.find_elements(By.TAG_NAME, "iframe")
     for el in elem:
         try:
@@ -35,7 +95,9 @@ def extract_iframes(driver):
             if el.get_attribute("id"):
                 i = el.get_attribute("id")
 
-            iframes.add( Classes.Iframe(i, src) )
+            iframe = Classes.Iframe(i, src)
+            iframes.add(iframe)
+            iframe_contexts[iframe] = extract_dom_context_for_iframe(el, driver)
 
         except StaleElementReferenceException as e:
             print("Stale pasta in from action")
@@ -56,7 +118,9 @@ def extract_iframes(driver):
             if el.get_attribute("id"):
                 i = el.get_attribute("i")
 
-            iframes.add( Classes.Iframe(i, src) )
+            iframe = Classes.Iframe(i, src)
+            iframes.add(iframe)
+            iframe_contexts[iframe] = extract_dom_context_for_iframe(el, driver)
 
         except StaleElementReferenceException as e:
             print("Stale pasta in from action")
@@ -65,5 +129,5 @@ def extract_iframes(driver):
             print(traceback.format_exc())
 
     
-    return iframes
+    return iframes, iframe_contexts
  

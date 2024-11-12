@@ -1,3 +1,6 @@
+from importlib.metadata import method_cache
+from lib2to3.fixes.fix_input import context
+
 from selenium import webdriver
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.common.action_chains import ActionChains
@@ -33,6 +36,9 @@ from extractors.Ui_forms import extract_ui_forms
 from selenium.webdriver.common.by import By
 
 import logging
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
 from openai import OpenAI
 
 log_file = os.path.join(os.getcwd(), 'logs', 'crawl-' + str(time.time()) + '.log')
@@ -57,8 +63,24 @@ class Request:
         # GET / POST
         self.method = method
 
+        self.context = {}
+
+        self.before_resource_operation = None
+
+        self.after_resource_operation = None
+
         # Form data
         # self.forms = []
+
+    def add_context(self, context):
+        for key in context:
+            self.context[key] = context[key]
+
+    def set_before_resource_operation(self, resource_operation):
+        self.before_resource_operation = resource_operation
+
+    def set_after_resource_operation(self, resource_operation):
+        self.after_resource_operation = resource_operation
 
     def __repr__(self):
         if not self:
@@ -75,17 +97,43 @@ class Request:
         else:
             ret = ret + self.url
 
+        if self.after_resource_operation:
+            ret = ret + " " + str(self.after_resource_operation)
+        elif self.before_resource_operation:
+            ret = ret + " " + str(self.before_resource_operation)
+
+        if self.context:
+            ret = ret + " " + str(self.context)
+
         return ret
 
     def __eq__(self, other):
         """Overrides the default implementation"""
         if isinstance(other, Request):
-            return (self.url == other.url and
-                    self.method == other.method)
+            ori_equal = (self.url == other.url and
+                        self.method == other.method)
+            if not ori_equal:
+                semantic_equal = False
+                method_equal = self.method == other.method
+                if (self.after_resource_operation and self.after_resource_operation != {}
+                    and other.after_resource_operation and other.after_resource_operation != {}):
+                    semantic_equal = method_equal and compare_resource_operation(self.after_resource_operation, other.after_resource_operation)
+                elif (self.before_resource_operation and self.before_resource_operation != {}
+                    and other.before_resource_operation and other.before_resource_operation != {}):
+                    semantic_equal = method_equal and compare_resource_operation(self.before_resource_operation, other.before_resource_operation)
+                else:
+                    semantic_equal = method_equal and compare_url_structure(self.url, other.url)
+                return semantic_equal
+            return ori_equal
         return False
 
     def __hash__(self):
-        return hash(self.url + self.method)
+        str_req = self.url + self.method
+        if self.after_resource_operation:
+            str_req += self.after_resource_operation
+        elif self.before_resource_operation:
+            str_req += self.before_resource_operation
+        return hash(str_req)
 
 
 class Graph:
@@ -143,7 +191,10 @@ class Graph:
         n1 = self.Node(v1)
         n2 = self.Node(v2)
         edge = self.Edge(n1, n2, value, parent)
-        return edge
+        exist = edge in self.edges
+        if exist:
+            logging.warning("Edge already exists %s" % str(edge))
+        return edge, exist
 
     def connect(self, v1, v2, value, parent=None):
         #print("[connect]",v1,v2,value)
@@ -155,7 +206,7 @@ class Graph:
         p2 = n2 in self.nodes
         p3 = not (edge in self.edges)
         #print(p1,p2,p3)
-        if (p1 and p2 and p3):
+        if p1 and p2 and p3:
             self.edges.append(edge)
             return True
         logging.warning("Failed to connect edge, %s (%s %s %s)" % (str(value), p1, p2, p3))
@@ -480,6 +531,72 @@ class Ui_form:
         return hash(frozenset([source['xpath'] for source in self.sources]))
 
 
+class RAGManager:
+
+    def __init__(self, index_file, reports_file=None):
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.index_file = index_file
+        self.metadata = {}
+
+        # 判断是否需要重新构建索引
+        if reports_file or not os.path.exists(self.index_file):
+            print("Building a new FAISS index...")
+            self.index, self.metadata = self.build_faiss_index(reports_file)
+            self.persist_index()  # 将新构建的索引持久化
+        else:
+            print("Loading FAISS index from disk...")
+            self.index = faiss.read_index(self.index_file)
+            self.metadata = self.load_metadata()
+
+    def build_faiss_index(self, reports_file):
+        # 从文件中加载漏洞报告
+        reports = json.loads(open(reports_file).read())
+
+        # 将描述与资源类型拼接并转换为向量
+        embeddings = [self.model.encode(
+            report["app_context"] + " " + report["resource_type"] + " " + report["operation"]
+        ) for report in reports]
+        embeddings = np.array(embeddings).astype("float32")
+
+        # 创建 FAISS 索引
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(embeddings)
+
+        # 存储每个向量的元数据（漏洞报告的相关信息）
+        metadata = {i: report for i, report in enumerate(reports)}
+        return index, metadata
+
+    def retrieve_similar_reports(self, query_text, top_k=3):
+        # 将查询文本转换为嵌入向量
+        query_embedding = self.model.encode(query_text).astype("float32").reshape(1, -1)
+
+        # 在向量数据库中检索 top-k 相似报告
+        _, indices = self.index.search(query_embedding, top_k)
+        similar_reports = [self.metadata[idx] for idx in indices[0]]
+        return similar_reports
+
+    def persist_index(self):
+        # 保存索引文件
+        faiss.write_index(self.index, self.index_file)
+
+        # 保存元数据
+        metadata_file = self.index_file + ".meta"
+        with open(metadata_file, "w") as f:
+            for i, report in self.metadata.items():
+                f.write(f"{i}\t{report}\n")
+
+    def load_metadata(self):
+        # 加载元数据文件
+        metadata_file = self.index_file + ".meta"
+        metadata = {}
+        if os.path.exists(metadata_file):
+            with open(metadata_file, "r") as f:
+                for line in f:
+                    i, report_str = line.strip().split("\t", 1)
+                    metadata[int(i)] = eval(report_str)  # 转回字典格式
+        return metadata
+
 class LLMManager:
     def __init__(self, api_key, base_url, context=None):
         self.api_key = api_key
@@ -493,36 +610,238 @@ class LLMManager:
     def clear_context(self):
         self.context = []
 
-    def generate_response(self, prompt):
-        system_prompt = """You are an assistant helping with form filling in a black-box testing tool. 
-        The user will provide the form input accessible name. Please generate the proper input content for the form and output them in JSON format.
-        EXAMPLE INPUT:
-        {
-            "accessible_name": "username",
-            "type": "text",
-        }
+    def fill_forms(self, dom_context, action_url, key_fields, prompt):
+        system_prompt_template = """You are an assistant helping with form filling in a black-box testing tool. 
+        There are some form contexts that help you understand the form structure and the form's action URL including DOM structure, form action URL, and key form fields.
+        The DOM structure of the form is as follows: {dom_context}.
+        The form's action URL is: {action_url}.
+        The key form fields are: {key_fields}.
         
-        EXAMPLE OUTPUT:
-        {
+        The user will provide the accessible name of the form input field, and you will generate appropriate input values for the form. 
+        Additionally, you will have access to contextual information, including the DOM structure of the form, the form’s action URL, and key form fields.
+        
+        Please generate suitable input content for the form field based on the accessible name and any relevant contextual clues, outputting the result in JSON format.
+        
+        For example, if user provides the accessible name "username" for a text field like this:
+        {{
+            "accessible_name": "username",
+            "type": "text"
+        }}
+        
+        Your response should be:
+        {{
             "value": "admin"
-        }"""
+        }}
+        
+        Take note of any additional field types and information provided in the form context. Use realistic values for fields where applicable, such as a valid email for an email field or a standard name for a text field.
+        """
+
+        system_prompt = system_prompt_template.format(dom_context=dom_context, action_url=action_url, key_fields=key_fields)
 
         conversation = [{'role': 'system',
-                         'content': system_prompt}]
-        conversation += self.context
-        conversation.append({'role': 'user', 'content': prompt})
+                         'content': system_prompt}, {'role': 'user', 'content': prompt}]
+        # conversation += self.context
 
-        response = self.client.chat.completions.create(
-            model="deepseek-chat",
-            messages=conversation,
-            response_format={
-                'type': 'json_object'
-            }
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                # model="llama3.2:1b",
+                messages=conversation,
+                response_format={
+                    'type': 'json_object'
+                }
+            )
 
-        answer = response.choices[0].message.content
-        self.add_to_context({'role': 'assistant', 'content': answer})
+            answer = response.choices[0].message.content
+
+            try:
+                answer = json.loads(answer)
+                if answer == {}:
+                    logging.warning("Failed to fill forms: " + str(answer))
+                elif not 'value' in answer:
+                    logging.error("Failed to fill forms: " + str(answer))
+                    answer = {}
+            except:
+                logging.error("Failed to parse response: " + str(answer))
+                answer = {}
+            self.add_to_context({'role': 'assistant', 'content': answer})
+        except Exception as e:
+            logging.error(f"Failed to generate response: {str(e)}")
+            answer = {}
         return answer
+
+    def identify_resource_operation_before_request(self, purpose, details, prompt):
+        system_prompt_template = """You are a penetration testing expert. Below is a description of a web application that you 
+        need to analyze. The purpose and main functionalities of this application are {purpose}. The main features include {details}.
+
+        I will provide you with various requests from this web application. Your task is to analyze each request and 
+        determine what operation will be performed on which resource. In addition, please categorize the operation into 
+        one of the following CRUD types: create, read, update, delete, or unknown.
+
+        Please answer in the following JSON format: {{"operation": "action", "resource": "resource type", "CRUD_type": "CRUD category"}}.
+
+        For example, if the request is about deleting an order, the answer should be: 
+        {{"operation": "delete", "resource": "order", "CRUD_type": "delete"}}.
+
+        Now, please analyze the provided request and determine the operation, resource, and CRUD type.
+
+        If you are unable to determine the operation or resource, please return {{}} or {{"operation": "unknown", "resource": "unknown", "CRUD_type": "unknown"}}.
+        """
+
+        system_prompt = system_prompt_template.format(purpose=purpose, details=details)
+
+        # 组合对话内容，包括系统提示和用户的请求提示
+        conversation = [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': prompt}]
+        # conversation += self.context
+
+        try:
+            # 调用LLM接口生成回答
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                # model="llama3.2:1b",
+                messages=conversation,
+                response_format={
+                    'type': 'json_object'
+                }
+            )
+
+            # 提取并返回回答
+            answer = response.choices[0].message.content
+
+            try:
+                answer = json.loads(answer)
+                if answer == {}:
+                    logging.warning("Failed to identify resource operation: " + str(answer))
+                elif not 'operation' in answer or not 'resource' in answer:
+                    logging.error("Failed to generate resource operation: " + str(answer))
+                    answer = {}
+                else:
+                    if 'operation' in answer and 'resource' in answer and 'CRUD_type' in answer:
+                        if answer['operation'] == "unknown" or answer['resource'] == "unknown":
+                            logging.warning("Unknown resource operation: " + str(answer))
+                            answer = {}
+            except:
+                logging.error("Failed to parse response: " + str(answer))
+                answer = {}
+
+            self.add_to_context({'role': 'assistant', 'content': answer})
+        except Exception as e:
+            logging.error(f"Failed to generate response: {str(e)}")
+            answer = {}
+        return answer
+
+    def identify_resource_operation_after_request(self, purpose, details, prompt):
+        system_prompt_template = """You are a penetration testing expert. Below is a description of a web application that you 
+        need to analyze. The purpose and main functionalities of this application are {purpose}. The main features include {details}.
+
+        We have encountered a situation where it is not possible to identify specific resource operations based solely on 
+        the contextual information available before the request is sent. Therefore, we need to compare the page state 
+        before and after the request, as well as the request and response data, to determine the resource operation.
+        
+        I will provide you with the page state before and after the request, as well as the request and response data.
+        Your task is to analyze this information and determine what operation will be performed on which resource. In addition,
+        please categorize the operation into one of the following CRUD types: create, read, update, delete, or unknown.
+        
+        Please answer in the following JSON format: {{"operation": "action", "resource": "resource type", "CRUD_type": "CRUD category"}}.
+        
+        For example, if the request is about deleting an order, the answer should be:
+        {{"operation": "delete", "resource": "order", "CRUD_type": "delete"}}.
+        
+        Now, please analyze the provided information and determine the operation, resource, and CRUD type.
+        
+        If you are unable to determine the operation or resource, please return {{}} or {{"operation": "unknown", "resource": "unknown", "CRUD_type": "unknown"}}.
+        """
+
+        system_prompt = system_prompt_template.format(purpose=purpose, details=details)
+
+        conversation = [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': prompt}]
+
+        try:
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=conversation,
+                response_format={
+                    'type': 'json_object'
+                }
+            )
+
+            answer = response.choices[0].message.content
+
+            try:
+                answer = json.loads(answer)
+                if answer == {}:
+                    logging.warning("Failed to identify resource operation: " + str(answer))
+                elif not 'operation' in answer or not 'resource' in answer:
+                    logging.error("Failed to generate resource operation: " + str(answer))
+                    answer = {}
+                else:
+                    if 'operation' in answer and 'resource' in answer and 'CRUD_type' in answer:
+                        if answer['operation'] == "unknown" or answer['resource'] == "unknown":
+                            logging.warning("Unknown resource operation: " + str(answer))
+                            answer = {}
+            except:
+                logging.error("Failed to parse response: " + str(answer))
+                answer = {}
+
+            self.add_to_context({'role': 'assistant', 'content': answer})
+        except Exception as e:
+            logging.error(f"Failed to generate response: {str(e)}")
+            answer = {}
+        return answer
+
+    def infer_resource_operation_sensitivity(self, purpose, details, prompt):
+        system_prompt_template = """You are a penetration testing expert. Below is a description of a web application that you 
+        need to analyze. The purpose and main functionalities of this application are {purpose}. The main features include {details}.
+
+        Your task is to assess the access control policy of a specific resource operation within this application to determine whether it may have authorization vulnerabilities. 
+        I will provide you with reference vulnerability reports that include both real and false reports to guide your analysis. 
+        Based on these, evaluate the access control policy of the resource operation in question by considering the following aspects:
+        1.	Privilege Operation Assessment: Does this operation require privileged access, such as access restricted to administrators or high-level users only?
+	    2.	User-Related Operation Assessment: Is this operation tied to a specific user? For example, is it an action that only the owner of the resource should be able to perform?
+	    3.	Sensitive Information Exposure Assessment: Does the resource contain sensitive information, and should this operation be limited to certain users or roles to prevent sensitive information exposure?
+
+        Please respond in the following JSON format: {{"Privilege Operation": "Yes or No", "User-Related Operation": "Yes or No", "Sensitive Information Exposure": "Yes or No"}}
+        
+        For example, if the operation requires privileged access, the answer should be:
+        {{"Privilege Operation": "Yes", "User-Related Operation": "No", "Sensitive Information Exposure": "No"}}
+        
+        Now, please evaluate the access control policy of the resource operation in question based on the provided information.
+        
+        If you are unable to determine the sensitivity of the resource operation, please return {{}} or {{"Privilege Operation": "Unknown", "User-Related Operation": "Unknown", "Sensitive Information Exposure": "Unknown"}}.
+        """
+
+        system_prompt = system_prompt_template.format(purpose=purpose, details=details)
+
+        conversation = [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': prompt}]
+
+        try:
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=conversation,
+                response_format={
+                    'type': 'json_object'
+                }
+            )
+
+            answer = response.choices[0].message.content
+
+            try:
+                answer = json.loads(answer)
+                if answer == {}:
+                    logging.warning("Failed to infer resource operation sensitivity: " + str(answer))
+                elif (not 'Privilege Operation' in answer or not 'User-Related Operation' in answer
+                      or not 'Sensitive Information Exposure' in answer):
+                    logging.error("Failed to infer resource operation sensitivity: " + str(answer))
+                    answer = {}
+            except:
+                logging.error("Failed to parse response: " + str(answer))
+                answer = {}
+            self.add_to_context({'role': 'assistant', 'content': answer})
+        except Exception as e:
+            logging.error(f"Failed to generate response: {str(e)}")
+            answer = {}
+        return answer
+
 
 class NetworkTrafficLogger:
     def __init__(self, driver):
@@ -542,6 +861,7 @@ class NetworkTrafficLogger:
 
                 request_data = {
                     "request_url": url,
+                    "request_method": request.method,
                     "request_headers": dict(request.headers),
                     "request_body": request.body.decode('utf-8', errors='ignore'),
                     "response_status": request.response.status_code,
@@ -563,6 +883,8 @@ class NetworkTrafficLogger:
 
 class Crawler:
     def __init__(self, driver, url):
+        self.root_req = None
+        self.debug_mode = None
         self.driver = driver
         # Start url
         self.url = url
@@ -593,9 +915,31 @@ class Crawler:
         self.done_form = {}
         self.max_done_form = 1
 
+        self.max_crawl_time = float(os.getenv("MAX_CRAWL_TIME", 3 * 60 * 60))  # 3小时 = 3 * 60分钟 * 60秒
+
         self.logger = NetworkTrafficLogger(driver)
 
-        self.llm_manager = LLMManager(os.environ.get("API_KEY"), os.environ.get("BASE_URL"))
+        self.llm_manager = LLMManager(os.getenv("API_KEY"), os.getenv("BASE_URL"))
+
+        self.rag_manager = RAGManager("faiss_index.index", os.getenv("REPORTS_FILE_PATH", None))
+
+        self.resource_operation = {}
+
+        self.link_urls = []
+
+        self.users = [os.getenv("USER_1"), os.getenv("USER_2")]
+
+        self.cookies = []
+
+        self.local_storages = []
+
+        self.session_storages = []
+
+        self.authorization_keys = []
+
+        self.login_url = ""
+
+        self.isRESTFUL = False
 
         logging.info("Init crawl on " + url)
 
@@ -604,7 +948,7 @@ class Crawler:
         req = Request(self.url, "get")
         self.graph.add(self.root_req)
         self.graph.add(req)
-        self.graph.connect(self.root_req, req, CrawlEdge("get", None, None))
+        self.graph.connect(self.root_req, req, CrawlEdge("get", None, None, None))
         self.debug_mode = debug_mode
 
         # Path deconstruction
@@ -619,7 +963,7 @@ class Crawler:
                         tmp_purl = purl._replace(path=path_builder)
                         req = Request(tmp_purl.geturl(), "get")
                         self.graph.add(req)
-                        self.graph.connect(self.root_req, req, CrawlEdge("get", None, None))
+                        self.graph.connect(self.root_req, req, CrawlEdge("get", None, None, None))
 
         self.graph.data['urls'] = {}
         self.graph.data['form_urls'] = {}
@@ -630,7 +974,15 @@ class Crawler:
         random.seed(6)  # chosen by fair dice roll
 
         still_work = True
+        start_time = time.time()  # 记录爬取开始的时间
         while still_work:
+
+            # 检查是否超过最大爬取时间
+            elapsed_time = time.time() - start_time
+            if elapsed_time > self.max_crawl_time:
+                logging.info("Maximum crawl time reached, stopping crawler.")
+                break
+
             print("-" * 50)
             new_edges = len([edge for edge in self.graph.edges if edge.visited == False])
             print("Edges left: %s" % str(new_edges))
@@ -650,7 +1002,7 @@ class Crawler:
                 n_forms = 0
                 n_events = 0
                 for edge in self.graph.edges:
-                    if edge.visited == False:
+                    if not edge.visited:
                         if edge.value.method == "get":
                             n_gets += 1
                         elif edge.value.method == "form":
@@ -686,8 +1038,65 @@ class Crawler:
 
         self.logger.log_traffic()
 
+        self.process_resource_operation()
+
+        self.infer_resource_operation_sensitivity()
+
         print("Done crawling, ready to attack!")
-        # self.attack()
+
+    def process_resource_operation(self):
+
+        resources = set()
+
+        for edge in self.graph.edges:
+            if not edge.visited:
+                continue
+            after_resource_operation = edge.value.after_resource_operation
+            before_resource_operation = edge.value.before_resource_operation
+            resource = None
+            if after_resource_operation and after_resource_operation != {} and after_resource_operation['resource'] != "unknown":
+                resource = after_resource_operation['resource']
+                resources.add(resource)
+                if resource not in self.resource_operation:
+                    self.resource_operation[resource] = []
+                self.resource_operation[resource].append({
+                    "operation": after_resource_operation['operation'],
+                    "CRUD_type": after_resource_operation['CRUD_type'],
+                    "edge": edge
+                })
+            elif before_resource_operation and before_resource_operation != {} and before_resource_operation['resource'] != "unknown":
+                resource = before_resource_operation['resource']
+                resources.add(resource)
+                if resource not in self.resource_operation:
+                    self.resource_operation[resource] = []
+                self.resource_operation[resource].append({
+                    "operation": before_resource_operation['operation'],
+                    "CRUD_type": before_resource_operation['CRUD_type'],
+                    "edge": edge
+                })
+                resources.add(before_resource_operation['resource'])
+
+    def infer_resource_operation_sensitivity(self):
+        purpose = os.getenv("PURPOSE", "")
+        details = os.getenv("DETAILS", "")
+
+        for resource in self.resource_operation:
+            for operation_related in self.resource_operation[resource]:
+                operation = operation_related['operation']
+                query = f"application purpose: {purpose} application details: {details} resource_type: {resource} operation: {operation}"
+                similar_reports = self.rag_manager.retrieve_similar_reports(query)
+                prompt = f"Please analyze the provided resource {resource} operation {operation} and determine the sensitivity of the operation based on the provided information. "
+                prompt += "You can refer to the following vulnerability reports to guide your analysis, including both real and false reports: "
+                index = 1
+                for report in similar_reports:
+                    prompt += f"\nReport {index} is a {report['trust']} report with the following content: {{"
+                    prompt += f"\napp_context: {report['app_context']}"
+                    prompt += f"\nresource_type: {report['resource_type']}"
+                    prompt += f"\noperation: {report['operation']}"
+                    prompt += f"\nsensitivity: {report['sensitivity']}\n}}"
+                    index += 1
+                sensitivity = self.llm_manager.infer_resource_operation_sensitivity(purpose, details, prompt)
+                operation_related['sensitivity'] = sensitivity
 
     def extract_vectors(self):
         print("Extracting urls")
@@ -1287,10 +1696,10 @@ class Crawler:
 
             req = Request(user_url, "get")
             current_cookies = driver.get_cookies()
-            new_edge = graph.create_edge(self.root_req, req, CrawlEdge(req.method, None, current_cookies),
+            new_edge, exist = graph.create_edge(self.root_req, req, CrawlEdge(req.method, None, None, current_cookies),
                                          graph.data['prev_edge'])
             graph.add(req)
-            graph.connect(self.root_req, req, CrawlEdge(req.method, None, current_cookies), graph.data['prev_edge'])
+            graph.connect(self.root_req, req, CrawlEdge(req.method, None, None, current_cookies), graph.data['prev_edge'])
 
             print(new_edge)
 
@@ -1308,8 +1717,41 @@ class Crawler:
         if list_to_use:
             print("Following iframe edge")
 
+        if not list_to_use:
+            create_edges = []
+            read_edges = []
+            update_edges = []
+            delete_edges = []
+            unknown_edges = []
+            for edge in graph.edges:
+                if not edge.visited:
+                    resource_operation = edge.value.before_resource_operation
+                    if not resource_operation:
+                        continue
+                    if "CRUD_type" in resource_operation:
+                        if resource_operation["CRUD_type"] == "create":
+                            create_edges.append(edge)
+                        elif resource_operation["CRUD_type"] == "read":
+                            read_edges.append(edge)
+                        elif resource_operation["CRUD_type"] == "update":
+                            update_edges.append(edge)
+                        elif resource_operation["CRUD_type"] == "delete":
+                            delete_edges.append(edge)
+                        elif resource_operation["CRUD_type"] == "unknown":
+                            unknown_edges.append(edge)
+
+            if create_edges:
+                list_to_use = create_edges
+            if read_edges:
+                list_to_use.extend(read_edges)
+            if update_edges:
+                list_to_use.extend(update_edges)
+            if unknown_edges:
+                list_to_use.extend(unknown_edges)
+
+
         # Start the crawl by focusing more on GETs
-        if not self.debug_mode:
+        if not list_to_use and not self.debug_mode:
             if self.early_gets < self.max_early_gets:
                 print("Looking for EARLY gets")
                 print(self.early_gets, "/", self.max_early_gets)
@@ -1390,7 +1832,7 @@ class Crawler:
 
         #for edge in graph.edges:
         for edge in list_to_use:
-            if edge.visited == False:
+            if not edge.visited:
                 if not check_edge(driver, graph, edge):
                     logging.warning("Check_edge failed for " + str(edge))
                     edge.visited = True
@@ -1401,7 +1843,7 @@ class Crawler:
 
         # Final fallback to any edge
         for edge in graph.edges:
-            if edge.visited == False:
+            if not edge.visited:
                 if not check_edge(driver, graph, edge):
                     logging.warning("Check_edge failed for " + str(edge))
                     edge.visited = True
@@ -1435,10 +1877,10 @@ class Crawler:
         if current_url != request.url:
             req = Request(current_url, request.method)
             logging.info("Changed url: " + current_url)
-            new_edge = graph.create_edge(edge.n1.value, req, CrawlEdge(edge.value.method, edge.value.method_data, edge.value.cookies), edge.parent)
-            if allow_edge(graph, new_edge):
+            new_edge, exist = graph.create_edge(edge.n1.value, req, CrawlEdge(edge.value.method, edge.value.method_data, edge.value.before_resource_operation, edge.value.cookies), edge.parent)
+            if not exist and allow_edge(graph, new_edge):
                 graph.add(req)
-                graph.connect(edge.n1.value, req, CrawlEdge(edge.value.method, edge.value.method_data, edge.value.cookies), edge.parent)
+                graph.connect(edge.n1.value, req, CrawlEdge(edge.value.method, edge.value.method_data, edge.value.before_resource_operation, edge.value.cookies, edge.value.after_resource_operation), edge.parent)
                 logging.info("Crawl (edge): " + str(new_edge))
                 print("Crawl (edge): " + str(new_edge))
                 graph.visit_node(request)
@@ -1452,7 +1894,37 @@ class Crawler:
             logging.info("Crawl (edge): " + str(edge))
             print("Crawl (edge): " + str(edge))
 
-        return (new_edge, req)
+        # if not edge.value.before_resource_operation or edge.value.before_resource_operation == {}:
+        prompt = f"""Below are the details of the request that is about to be sent from a web application. 
+        Before the request is sent, the page state is provided in Markdown format as follows: [{edge.value.get_before_context()}]. 
+        After the request is sent, the page state is also presented in Markdown format as follows: [{edge.value.get_after_context()}].
+        """
+        request_datas = edge.value.get_request_datas()
+        index = 0
+        for request_data in request_datas:
+            if index == 0:
+                prompt += "The request traffics is as follows: \n"
+            request_url = request_data['request_url']
+            request_headers = request_data['request_headers']
+            request_body = request_data['request_body']
+            response_status = request_data['response_status']
+            response_headers = request_data['response_headers']
+            prompt += f"""Request {index}: request_url: {request_url}, request_headers: {request_headers}, 
+                        request_body: {request_body}, response_status: {response_status}, response_headers: {response_headers}"""
+            if 'response_body' in request_data:
+                response_body = request_data['response_body']
+                prompt += f", response_body: {response_body}"
+            prompt += "\n"
+            index += 1
+
+        purpose = os.getenv("PURPOSE", "")
+        details = os.getenv("DETAILS", "")
+        resource_operation = self.llm_manager.identify_resource_operation_after_request(purpose, details, prompt)
+        edge.value.after_resource_operation = resource_operation
+        edge.n2.value.set_after_resource_operation(resource_operation)
+
+
+        return new_edge, req
 
     # Actually not recursive (TODO change name)
     def rec_crawl(self):
@@ -1522,12 +1994,31 @@ class Crawler:
             logging.warning("No timeouts from stringify")
 
         # Extract urls, forms, elements, iframe etc
-        reqs = extract_urls(driver)
-        forms = extract_forms(driver)
-        forms = set_form_values(forms, llm_manager)
-        ui_forms = extract_ui_forms(driver)
-        events = extract_events(driver)
-        iframes = extract_iframes(driver)
+        reqs, url_contexts = extract_urls(driver)
+        forms, form_contexts = extract_forms(driver)
+        for form in forms:
+            form_context = form_contexts[form]
+            new_forms = set_form_values([form], llm_manager, form_context)
+            new_forms_list = list(new_forms)
+            if form == new_forms_list[0]:
+                form_contexts.pop(form)
+            form_contexts[new_forms_list[0]] = form_context
+
+        # forms = set_form_values(forms, llm_manager)
+        ui_forms, ui_form_contexts = extract_ui_forms(driver)
+        events, event_contexts = extract_events(driver)
+        iframes, iframe_contexts = extract_iframes(driver)
+
+        for request_data in edge.value.request_datas:
+            request_body = request_data['request_body']
+            try:
+                request_body_json = json.loads(request_body)
+            except:
+                request_body_json = {}
+            self.link_urls.extend(extract_urls_from_json(request_body_json))
+
+        purpose = os.getenv("PURPOSE", "")
+        details = os.getenv("DETAILS", "")
 
         # Check if we need to wait for asynch
         try:
@@ -1544,60 +2035,161 @@ class Crawler:
         # Add findings to the graph
         current_cookies = driver.get_cookies() #bear
 
+        access_token_script = """
+            const data = JSON.parse(localStorage.getItem('persist:reducers'));
+            const userReducer = JSON.parse(data.userReducer);
+            return userReducer.accessToken;
+        """
+        access_token = driver.execute_script(access_token_script)
+        if access_token:
+            print("Access Token:", access_token)
+        else:
+            print("Access Token not found in userReducer.")
+
         logging.info("Adding requests from URLs")
-        for req in reqs:
+
+        url_prompt_template = """
+        Below is a URL request that is about to be sent from a web application. I will provide relevant information, 
+        including the DOM structure of the element that triggered the request, the element type, as well as the full URL path and its parameters. 
+        Here is the data: (1) DOM: {dom_context}; (2) ELEMENT TYPE: {element_type}; (3) URL: {url}.
+        """
+        for req in url_contexts:
             logging.info("from URLs %s " % str(req))
-            new_edge = graph.create_edge(request, req, CrawlEdge(req.method, None, current_cookies), edge)
-            if allow_edge(graph, new_edge):
+
+            new_edge, exist = graph.create_edge(request, req, CrawlEdge(req.method, None, None, current_cookies), edge)
+            if not exist and allow_edge(graph, new_edge):
+
+                url_context = url_contexts[req]
+                req.add_context(url_context)
+                dom_context = dom_context_format(url_context['dom_context'])
+                element_type = json.dumps(url_context['element_type'])
+                url = req.url
+                url_prompt = url_prompt_template.format(dom_context=dom_context, element_type=element_type, url=url)
+                url_analysis = self.llm_manager.identify_resource_operation_before_request(purpose, details, url_prompt)
+                req.set_before_resource_operation(url_analysis)
+
                 graph.add(req)
-                graph.connect(request, req, CrawlEdge(req.method, None, current_cookies), edge)
+                graph.connect(request, req, CrawlEdge(req.method, None, url_analysis, current_cookies), edge)
             else:
                 logging.info("Not allowed to add edge: %s" % new_edge)
 
         logging.info("Adding requests from forms")
-        for form in forms:
+
+        form_prompt_template = """
+        Below is a form request about to be submitted from a web application. I will provide relevant information, 
+        including the DOM structure of the form, the form's action URL, and key form fields. 
+        
+        Here is the data: (1) DOM: {dom_context}; (2) Action URL: {action_url}; (3) Form fields: {form_fileds}.
+        """
+        for form in form_contexts:
             req = Request(form.action, form.method)
             logging.info("from forms %s " % str(req))
-            new_edge = graph.create_edge(request, req, CrawlEdge("form", form, current_cookies), edge)
-            if allow_edge(graph, new_edge):
+
+            new_edge, exist = graph.create_edge(request, req, CrawlEdge("form", form, None, current_cookies), edge)
+            if not exist and allow_edge(graph, new_edge):
+
+                form_context = form_contexts[form]
+                req.add_context(form_context)
+                dom_context = dom_context_format(form_context['dom_context'])
+                action_url = json.dumps(form_context['action_url'])
+                form_fields = str(form)
+                form_prompt = form_prompt_template.format(dom_context=dom_context, action_url=action_url,
+                                                          form_fileds=form_fields)
+                form_analysis = self.llm_manager.identify_resource_operation_before_request(purpose, details, form_prompt)
+                req.set_before_resource_operation(form_analysis)
+
                 graph.add(req)
-                graph.connect(request, req, CrawlEdge("form", form, current_cookies), edge)
+                graph.connect(request, req, CrawlEdge("form", form, form_analysis, current_cookies), edge)
             else:
                 logging.info("Not allowed to add edge: %s" % new_edge)
 
         logging.info("Adding requests from events")
-        for event in events:
+
+        event_prompt_template = """
+        Here is an EVENT request that is about to be triggered in the web application. I will provide relevant information, 
+        including the DOM structure related to the event, the JavaScript event handler, and the corresponding action URL for the event. 
+        The details are as follows: (1) DOM: {dom_context}; (2) JavaScript Event: {js_event}; (3) Action URL: {url}.
+        """
+        for event in event_contexts:
             req = Request(request.url, "event")
             logging.info("from events %s " % str(req))
 
-            new_edge = graph.create_edge(request, req, CrawlEdge("event", event, current_cookies), edge)
-            if allow_edge(graph, new_edge):
+            new_edge, exist = graph.create_edge(request, req, CrawlEdge("event", event, None, current_cookies), edge)
+            if not exist and allow_edge(graph, new_edge):
+
+                event_context = event_contexts[event]
+                req.add_context(event_context)
+                dom_context = dom_context_format(event_context['dom_context'])
+                js_event = json.dumps(event_context['event'])
+                url = json.dumps(event_context['url'])
+                event_prompt = event_prompt_template.format(dom_context=dom_context, js_event=js_event, url=url)
+                event_analysis = self.llm_manager.identify_resource_operation_before_request(purpose, details, event_prompt)
+                req.set_before_resource_operation(event_analysis)
+
                 graph.add(req)
-                graph.connect(request, req, CrawlEdge("event", event, current_cookies), edge)
+                graph.connect(request, req, CrawlEdge("event", event, event_analysis, current_cookies), edge)
             else:
                 logging.info("Not allowed to add edge: %s" % new_edge)
 
         logging.info("Adding requests from iframes")
-        for iframe in iframes:
+
+        iframe_prompt_template = """
+        Below is an IFRAME request embedded in a web application. I will provide relevant information, 
+        including the IFRAME's attributes, the DOM structure, and the embedded URL. 
+        Here is the data: (1) IFRAME Attributes: {iframe_content}; (2) DOM: {dom_context}; (3) Embedded URL: {url}.
+        """
+        for iframe in iframe_contexts:
             req = Request(iframe.src, "iframe")
             logging.info("from iframes %s " % str(req))
 
-            new_edge = graph.create_edge(request, req, CrawlEdge("iframe", iframe, current_cookies), edge)
-            if allow_edge(graph, new_edge):
+            new_edge, exist = graph.create_edge(request, req, CrawlEdge("iframe", iframe, None, current_cookies), edge)
+            if not exist and allow_edge(graph, new_edge):
+
+                iframe_context = iframe_contexts[iframe]
+                req.add_context(iframe_context)
+                iframe_content = json.dumps(iframe_context['iframe_content'])
+                dom_context = dom_context_format(iframe_context['dom_context'])
+                url = json.dumps(iframe_context['url'])
+                iframe_prompt = iframe_prompt_template.format(iframe_content=iframe_content, dom_context=dom_context,
+                                                              url=url)
+                iframe_analysis = self.llm_manager.identify_resource_operation_before_request(purpose, details, iframe_prompt)
+                req.set_before_resource_operation(iframe_analysis)
+
                 graph.add(req)
-                graph.connect(request, req, CrawlEdge("iframe", iframe, current_cookies), edge)
+                graph.connect(request, req, CrawlEdge("iframe", iframe, iframe_analysis, current_cookies), edge)
             else:
                 logging.info("Not allowed to add edge: %s" % new_edge)
 
         logging.info("Adding requests from ui_forms")
-        for ui_form in ui_forms:
+
+        ui_form_prompt_template = """
+        Below is a UI_FORM request about to be triggered in a web application. I will provide relevant information, 
+        including the DOM structure of the UI_FORM, the JavaScript event handler, the form's action URL, and key interactive elements. 
+        Here is the data: (1) DOM: {dom_context}; (2) JavaScript Event: {js_event}; (3) Action URL: {action_url}; 
+        (4) Interactive Elements: {interactive_elements}.
+        """
+
+        for ui_form in ui_form_contexts:
             req = Request(driver.current_url, "ui_form")
             logging.info("from ui_forms %s " % str(req))
 
-            new_edge = graph.create_edge(request, req, CrawlEdge("ui_form", ui_form, current_cookies), edge)
-            if allow_edge(graph, new_edge):
+            new_edge, exist = graph.create_edge(request, req, CrawlEdge("ui_form", ui_form, None, current_cookies), edge)
+            if not exist and allow_edge(graph, new_edge):
+
+                ui_form_context = ui_form_contexts[ui_form]
+                req.add_context(ui_form_context)
+                dom_context = dom_context_format(ui_form_context['dom_context'])
+                js_event = json.dumps(ui_form_context['js_event'])
+                action_url = json.dumps(ui_form_context['action_url'])
+                interactive_elements = str(ui_form)
+                ui_form_prompt = ui_form_prompt_template.format(dom_context=dom_context, js_event=js_event,
+                                                                action_url=action_url,
+                                                                interactive_elements=interactive_elements)
+                ui_form_analysis = self.llm_manager.identify_resource_operation_before_request(purpose, details, ui_form_prompt)
+                req.set_before_resource_operation(ui_form_analysis)
+
                 graph.add(req)
-                graph.connect(request, req, CrawlEdge("ui_form", ui_form, current_cookies), edge)
+                graph.connect(request, req, CrawlEdge("ui_form", ui_form, ui_form_analysis, current_cookies), edge)
             else:
                 logging.info("Not allowed to add edge: %s" % new_edge)
 
@@ -1610,16 +2202,28 @@ class Crawler:
             new_form = set_form_values(set([login_form]), llm_manager).pop()
             try:
                 print("Logging in")
+                before_num = len(driver.requests)
+                self.login_url = driver.current_url
                 form_fill(driver, new_form)
                 time.sleep(2)
+                after_num = len(driver.requests)
+
+                get_traffic(driver, graph, before_num, after_num, edge)
+
+                self.cookies.append(driver.get_cookies())
+                self.local_storages.append(driver.execute_script("return JSON.stringify(localStorage)"))
+                self.session_storages.append(driver.execute_script("return JSON.stringify(sessionStorage)"))
+
+                self.authorization_keys.append(get_authorization_key(edge.value.get_request_datas()))
+
                 current_url = driver.current_url
                 if current_url != request.url:
                     new_request = Request(current_url, request.method)
                     logging.info("Changed url: " + current_url)
-                    new_edge = graph.create_edge(request, new_request, CrawlEdge("get", None, None), edge)
-                    if allow_edge(graph, new_edge):
+                    new_edge, exist = graph.create_edge(request, new_request, CrawlEdge("get", None, None, None), edge)
+                    if not exist and allow_edge(graph, new_edge):
                         graph.add(new_request)
-                        graph.connect(request, new_request, CrawlEdge("get", None, None), edge)
+                        graph.connect(request, new_request, CrawlEdge("get", None, None, None), edge)
                         logging.info("Crawl (edge): " + str(new_edge))
                         print("Crawl (edge): " + str(new_edge))
                         edge = new_edge
@@ -1654,7 +2258,7 @@ class Crawler:
             f.write(str(self.graph))
             f.close()
             found_command = True
-        # Clear commad
+        # Clear command
         if found_command:
             open("command.txt", "w+").write("")
 
@@ -1663,17 +2267,61 @@ class Crawler:
 
 # Edge with specific crawling info, cookies, type of request etc.
 class CrawlEdge:
-    def __init__(self, method, method_data, cookies):
+    def __init__(self, method, method_data, before_resource_operation, cookies, after_resource_operation=None):
         self.method = method
         self.method_data = method_data
+        self.before_resource_operation = before_resource_operation
         self.cookies = cookies
+        self.after_resource_operation = after_resource_operation
+        self.before_context = None
+        self.after_context = None
+        self.request_datas = []
+
+    def get_before_context(self):
+        return self.before_context
+
+    def get_after_context(self):
+        return self.after_context
+
+    def get_request_datas(self):
+        return self.request_datas
+
+    def set_before_context(self, context):
+        self.before_context = context
+
+    def set_after_context(self, context):
+        self.after_context = context
+
+    def set_request_datas(self, request_datas):
+        self.request_datas = request_datas
 
     def __repr__(self):
-        return str(self.method) + " " + str(self.method_data)
+        str_edge = str(self.method) + " " + str(self.method_data)
+        if self.after_resource_operation:
+            str_edge += " " + str(self.after_resource_operation)
+        elif self.before_resource_operation:
+            str_edge += " " + str(self.before_resource_operation)
+        return str_edge
 
     # Cookies are not considered for equality.
     def __eq__(self, other):
-        return (self.method == other.method and self.method_data == other.method_data)
+        ori_equal = (self.method == other.method and self.method_data == other.method_data)
+        if not ori_equal:
+            semantic_equal = False
+            method_equal = self.method == other.method
+            if (self.after_resource_operation and self.after_resource_operation != {}
+                and other.after_resource_operation and other.after_resource_operation != {}):
+                semantic_equal = method_equal and compare_resource_operation(self.after_resource_operation, other.after_resource_operation)
+            elif (self.before_resource_operation and self.before_resource_operation != {}
+                and other.before_resource_operation and other.before_resource_operation != {}):
+                semantic_equal = method_equal and compare_resource_operation(self.before_resource_operation, other.before_resource_operation)
+            return semantic_equal
+        return ori_equal
 
     def __hash__(self):
-        return hash(hash(self.method) + hash(self.method_data))
+        resource_operation = None
+        if self.after_resource_operation:
+            resource_operation = self.after_resource_operation
+        elif self.before_resource_operation:
+            resource_operation = self.before_resource_operation
+        return hash(hash(self.method) + hash(self.method_data) + hash(resource_operation))

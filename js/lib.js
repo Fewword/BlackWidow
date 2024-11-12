@@ -263,6 +263,31 @@ function getXPath(element) {
 added_events = Array();
 function addEventListenerWrapper(elem, args) {
 
+  // 获取页面标题
+  let page_title = document.title;
+
+  // 获取父节点的HTML
+  let parent_html = elem.parentElement ? elem.parentElement.outerHTML : '';
+
+  // 获取兄弟节点的HTML
+  let sibling_html = [];
+  let siblings = elem.parentElement ? elem.parentElement.children : [];
+  for (let i = 0; i < siblings.length; i++) {
+    if (siblings[i] !== elem) {
+      sibling_html.push(siblings[i].outerHTML);
+    }
+  }
+
+  // 构建DOM上下文
+  let dom_context = {
+    "current_node": elem.outerHTML,
+    "parent_node": parent_html,
+    "sibling_nodes": sibling_html,
+    "page_title": page_title
+  };
+
+  // 获取当前页面的URL
+  let current_url = window.location.href;
 
   // Could move and only use when XPATH fails
   // console.log(elem)
@@ -289,7 +314,9 @@ function addEventListenerWrapper(elem, args) {
 		"addr" : dom_adress,
 		"id" : id,
 		"tag" : tag,
-		"class" : html_class
+		"class" : html_class,
+		"dom_context": dom_context,
+		"url": current_url
 	}
 	//console.log(resp)
 	//resp = JSON.stringify(resp)
@@ -304,6 +331,13 @@ function addEventListenerWrapper(elem, args) {
 			e = inputs[i];
 			if (e.getAttribute("type") == "radio"
 					|| e.getAttribute("type") == "checkbox") {
+				let input_dom_context = {
+                  "current_node": e.outerHTML,
+                  "parent_node": e.parentElement ? e.parentElement.outerHTML : '',
+                  "sibling_nodes": Array.from(e.parentElement ? e.parentElement.children : []).map(sibling => sibling.outerHTML),
+                  "page_title": document.title
+                };
+
 				tag = e.tagName
 				id = e.id;
 				html_class = e.className;
@@ -315,7 +349,9 @@ function addEventListenerWrapper(elem, args) {
 					"addr" : dom_adress,
 					"id" : id,
 					"tag" : tag,
-					"class" : html_class
+					"class" : html_class,
+					"dom_context": input_dom_context,
+					"url": window.location.href
 				}
 				resp = JSON.stringify(resp)
 				jswrapper.add_eventListener_to_element(resp)
@@ -323,7 +359,15 @@ function addEventListenerWrapper(elem, args) {
 		}
 		for (i = 0; i < selects.length; i++) {
 			s = selects[i];
-			tag = s.tagName
+
+            let select_dom_context = {
+                "current_node": s.outerHTML,
+                "parent_node": s.parentElement ? s.parentElement.outerHTML : '',
+                "sibling_nodes": s.parentElement ? Array.from(s.parentElement.children).map(sibling => sibling.outerHTML) : [],
+                "page_title": document.title
+            };
+
+			tag = s.tagName;
 			id = s.id;
 			html_class = s.className;
 			dom_adress = getXPath(s);
@@ -334,13 +378,23 @@ function addEventListenerWrapper(elem, args) {
 				"addr" : dom_adress,
 				"id" : id,
 				"tag" : tag,
-				"class" : html_class
+				"class" : html_class,
+				"dom_context": select_dom_context,
+				"url": window.location.href
 			}
 			resp = JSON.stringify(resp)
 			jswrapper.add_eventListener_to_element(resp)
 		}
 		for (xx = 0; xx < options.length; xx++) {
 			element = options[i]
+
+			let option_dom_context = {
+			    "current_node": element.outerHTML,
+                "parent_node": element.parentElement ? element.parentElement.outerHTML : '',
+                "sibling_nodes": element.parentElement ?Array.from(element.parentElement.children).map(sibling => sibling.outerHTML) : [],
+                "page_title": document.title
+            };
+
 			tag = element.tagName
 			id = element.id;
 			html_class = element.className;
@@ -352,7 +406,9 @@ function addEventListenerWrapper(elem, args) {
 				"addr" : dom_adress,
 				"id" : id,
 				"tag" : tag,
-				"class" : html_class
+				"class" : html_class,
+				"dom_context": option_dom_context,
+				"url": window.location.href
 			}
 			resp = JSON.stringify(resp)
 			jswrapper.add_eventListener_to_element(resp)
@@ -362,6 +418,14 @@ function addEventListenerWrapper(elem, args) {
         candidates = elem.querySelectorAll("button");
         for( xx = 0; xx < candidates.length; xx++) {
             var element = candidates[xx];
+
+            let button_dom_context = {
+                "current_node": element.outerHTML,
+                "parent_node": element.parentElement ? element.parentElement.outerHTML : '',
+                "sibling_nodes": element.parentElement ? Array.from(element.parentElement.children).map(sibling => sibling.outerHTML) : [],
+                "page_title": document.title
+            };
+
             tag = element.tagName;
             id = element.id;
             html_class = element.className;
@@ -373,7 +437,9 @@ function addEventListenerWrapper(elem, args) {
                 "addr": dom_adress,
                 "id": id,
                 "tag": tag,
-                "class": html_class
+                "class": html_class,
+                "dom_context": button_dom_context,
+                "url": window.location.href
             };
             //resp = JSON.stringify(resp);
             added_events.push( resp )

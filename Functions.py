@@ -9,7 +9,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, \
     UnexpectedAlertPresentException, NoSuchFrameException, NoAlertPresentException, ElementNotVisibleException, \
     InvalidElementStateException, NoSuchElementException
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, parse_qs
 from selenium.webdriver.common.by import By
 import json
 import pprint
@@ -24,6 +24,8 @@ import logging
 import copy
 import time
 import operator
+import html2text
+from typing import List, Union
 
 import Classes
 from extractors.Events import extract_events
@@ -43,7 +45,6 @@ def send(driver, cmd, params={}):
 
 def add_script(driver, script):
   send(driver, "Page.addScriptToEvaluateOnNewDocument", {"source": script})
-
 
 # Changes the address from the row to the first cell
 # Only modifies if it is a table row
@@ -67,8 +68,6 @@ def remove_alerts(driver):
     except NoAlertPresentException:
         pass
 
-
-
 def depth(edge):
     depth = 1
     while edge.parent:
@@ -87,12 +86,24 @@ def dom_depth(edge):
 def find_state(driver, graph, edge):
     path = rec_find_path(graph, edge)
 
+    text_maker = html2text.HTML2Text()
+    text_maker.ignore_links = True
+    last_edge = False
+    successful = False
     for edge_in_path in path:
+        if edge_in_path == edge:
+            last_edge = True
         method = edge_in_path.value.method
         method_data = edge_in_path.value.method_data
         logging.info("find_state method %s" % method)
 
         if allow_edge(graph, edge_in_path):
+            time.sleep(0.5)
+            if last_edge:
+                time.sleep(1)
+                before_num = len(driver.requests)
+                before_page = text_maker.handle(driver.page_source)
+                edge_in_path.value.set_before_context(before_page)
             if method == "get":
                 driver.get(edge_in_path.n2.value.url)
                 time.sleep(1)
@@ -138,8 +149,16 @@ def find_state(driver, graph, edge):
             else:
                 raise Exception( "Can't handle method (%s) in find_state" % method )
 
-    return True
+            if last_edge:
+                time.sleep(2)
+                after_num = len(driver.requests)
+                after_page = text_maker.handle(driver.page_source)
+                edge_in_path.value.set_after_context(after_page)
+                so = get_traffic(driver, graph, before_num, after_num, edge_in_path)
+                if so or after_page != before_page:
+                    successful = True
 
+    return successful
 
 # Recursively follows parent until a stable node is found.
 # Stable in this case would be defined as a GET
@@ -154,13 +173,11 @@ def rec_find_path(graph, edge):
     else:
         return rec_find_path(graph, parent) + [edge]
 
-
 def edge_sort(edge):
     if edge.value[0] == "form":
         return 0
     else:
         return 1
-
 
 # Check if we should follow edge
 # Could be based on SOP, number of reqs, etc.
@@ -204,16 +221,65 @@ def check_edge(driver, graph, edge):
     else:
         return True
 
+def get_traffic(driver, graph, before_num, after_num, edge):
+    traffic_data = []
+    logged_urls = set()
 
+    so = False
+    from_url = graph.nodes[1].value.url
 
+    for request in driver.requests[before_num:after_num]:
+        if request.response:
+            url = request.url
+            if url.endswith((".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico")):
+                if url in logged_urls:
+                    continue
+                logged_urls.add(url)
+
+            request_data = {
+                "request_url": url,
+                "request_method": request.method,
+                "request_headers": dict(request.headers),
+                "request_body": request.body.decode('utf-8', errors='ignore'),
+                "response_status": request.response.status_code,
+                "response_headers": dict(request.response.headers),
+            }
+
+            if same_origin(from_url, url):
+                so = True
+
+            # Add response body only for non-static files
+            if not url.endswith((".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico")):
+                try:
+                    request_data["response_body"] = request.response.body.decode('utf-8', errors='ignore')
+                except Exception as e:
+                    request_data["response_body_error"] = str(e)
+
+            traffic_data.append(request_data)
+
+    edge.value.set_request_datas(traffic_data)
+
+    return so
 
 def follow_edge(driver, graph, edge):
 
     logging.info("Follow edge: " + str(edge) )
     method = edge.value.method
     method_data = edge.value.method_data
+    resource_operation = edge.value.before_resource_operation
     if method == "get":
+        text_maker = html2text.HTML2Text()
+        text_maker.ignore_links = True
+
+        before_num = len(driver.requests)
+        edge.value.set_before_context(text_maker.handle(driver.page_source))
+
         driver.get(edge.n2.value.url)
+
+        after_num = len(driver.requests)
+        edge.value.set_after_context(text_maker.handle(driver.page_source))
+        get_traffic(driver, graph, before_num, after_num, edge)
+
         time.sleep(1)
     elif method == "form":
         logging.info("Form, do find_state")
@@ -251,8 +317,21 @@ def follow_edge(driver, graph, edge):
     # Success
     return True
 
+def compare_resource_operation(ro1, ro2):
+    return ro1 == ro2
 
+def compare_url_structure(url1, url2):
+    parsed_url1 = urlparse(url1)
+    parsed_url2 = urlparse(url2)
 
+    if (parsed_url1.scheme, parsed_url1.netloc, parsed_url1.path) != (
+    parsed_url2.scheme, parsed_url2.netloc, parsed_url2.path):
+        return False
+
+    params1 = set(parse_qs(parsed_url1.query).keys())
+    params2 = set(parse_qs(parsed_url2.query).keys())
+
+    return params1 == params2
 
 # Checks if two URLs target the same origin
 def same_origin(u1, u2):
@@ -313,11 +392,6 @@ def allow_edge(graph, edge):
     else:
         logging.debug("Different origins %s and %s" % (str(from_url), str(to_url)))
         return False
-
-
-
-
-
 
 def execute_event(driver, do):
     logging.info("We need to trigger [" +  do.event + "] on " + do.addr)
@@ -403,10 +477,6 @@ def execute_event(driver, do):
         print("Error", do)
         print(e.msg)
 
-
-
-
-
 def form_fill_file(filename):
     dirname = os.path.dirname(__file__)
     path = os.path.join(dirname, 'form_files', filename)
@@ -419,8 +489,6 @@ def form_fill_file(filename):
         dynamic_file.close()
 
     return path
-
-
 
 # The problem is that equality does not cover both cases
 # Different values => Different Edges           (__eq__)
@@ -464,7 +532,7 @@ def form_fill(driver, target_form):
 
         submit_buttons = []
 
-        if( not fuzzy_eq(current_form, target_form) ):
+        if not fuzzy_eq(current_form, target_form):
             continue
 
         # TODO handle each element
@@ -723,7 +791,6 @@ def form_fill(driver, target_form):
     return False
     #raise Exception("error no form found (url:%s, form:%s)" % (driver.current_url, target_form) )
 
-
 def ui_form_fill(driver, target_form):
     logging.debug("Filling ui_form "+ str(target_form))
 
@@ -764,9 +831,17 @@ def ui_form_fill(driver, target_form):
     submit_element =  driver.find_element(By.XPATH, target_form.submit)
     submit_element.click()
 
-def set_standard_values(old_form, llm_manager):
+def set_standard_values(old_form, llm_manager, form_context=None):
     form = copy.deepcopy(old_form)
     first_radio = True
+
+    dom_context = ''
+    action_url = ''
+    form_fields = ''
+    if form_context:
+        dom_context = dom_context_format(form_context['dom_context'])
+        action_url = json.dumps(form_context['action_url'])
+        form_fields = str(old_form)
 
     for form_el in form.inputs.values():
         if form_el.itype == "file":
@@ -775,7 +850,7 @@ def set_standard_values(old_form, llm_manager):
             if first_radio:
                 form_el.click = True
                 first_radio = False
-            # else dont change the value
+            # else don't change the value
         elif form_el.itype == "checkbox":
             # Just activate all checkboxes
             form_el.checked = True
@@ -787,7 +862,7 @@ def set_standard_values(old_form, llm_manager):
             else:
                 logging.warning( str(form_el) + " has no options" )
         elif form_el.itype == "text":
-            if form_el.value == None:
+            if form_el.value is None:
                 if form_el.value and form_el.value.isdigit():
                     form_el.value = 1
                 elif form_el.name == "email": # to_lower
@@ -795,14 +870,14 @@ def set_standard_values(old_form, llm_manager):
                 else:# if value is none
                     form_el.value = "user1@test.com"
         elif form_el.itype == "textarea":
-            if form_el.value == None:
+            if form_el.value is None:
                 prompt = f"""{{
                     "accessible_name": {form_el.accessible_name},
                     "type": "textarea",
                 }}"""
-                generated_data = llm_manager.generate_response(prompt)
-                json_data = json.loads(generated_data)
-                form_el.value = json_data.get('value', 'No value found')
+                generated_data = llm_manager.fill_forms(dom_context, action_url, form_fields, prompt)
+                # json_data = json.loads(generated_data)
+                form_el.value = generated_data.get('value', 'No value found')
         elif form_el.itype == "email":
             form_el.value = "user1@test.com"
         elif form_el.itype == "hidden":
@@ -855,13 +930,13 @@ def set_checkboxes(forms):
                 new_forms.add(new_form)
     return new_forms
 
-def set_form_values(forms, llm_manager):
+def set_form_values(forms, llm_manager, form_context=None):
     logging.info("set_form_values got " + str(len(forms)))
     new_forms = set()
     # Set values for forms.
     # Could also create copies of forms to test different values
     for old_form in forms:
-        new_forms.add( set_standard_values(old_form, llm_manager) )
+        new_forms.add( set_standard_values(old_form, llm_manager, form_context) )
 
     # Handle submits
     new_forms = set_submits(new_forms)
@@ -872,7 +947,6 @@ def set_form_values(forms, llm_manager):
     logging.info("set_form_values returned " + str(len(new_forms)))
 
     return new_forms
-
 
 def enter_iframe(driver, target_frame):
     elem = driver.find_elements(By.TAG_NAME, "iframe")
@@ -902,7 +976,7 @@ def enter_iframe(driver, target_frame):
     return False
 
 def find_login_form(driver, graph, early_state=False):
-    forms = extract_forms(driver)
+    forms, form_contexts = extract_forms(driver)
     for form in forms:
         for form_input in form.inputs:
             if form_input.itype == "password":
@@ -914,7 +988,6 @@ def find_login_form(driver, graph, early_state=False):
                 # We need to make sure that the form is part of the graph
                 logging.info("NEED TO LOGIN FOR FORM: " + str(form))
                 return form
-
 
 def linkrank(link_edges, visited_list):
     tups = []
@@ -953,10 +1026,90 @@ def new_files(link_edges, visited_list):
 
     return [edge for (edge, _) in tups]
 
-
 # Returns None if the string is empty, otherwise just the string
 def empty2none(s):
     if not s:
         return None
     else:
         return s
+
+def dom_context_format(dom_context):
+    dom_context_prompt = ''
+    if 'current_node' in dom_context:
+        current_node = dom_context['current_node']
+        dom_context_prompt += 'current node dom context contains: '
+        if isinstance(current_node, str):
+            dom_context_prompt += f"html: {current_node}"
+        elif isinstance(current_node, dict):
+            if 'tag_name' in current_node:
+                dom_context_prompt += f"tag_name: {current_node['tag_name']}, "
+            if 'attributes' in current_node:
+                dom_context_prompt += f"attributes: {current_node['attributes']}, "
+            if 'text' in current_node:
+                dom_context_prompt += f"text: {current_node['text']}"
+        else:
+            dom_context_prompt += f"{current_node}"
+    if 'parent_node' in dom_context:
+        parent_node = dom_context['parent_node']
+        dom_context_prompt += ', parent node dom context contains: '
+        if isinstance(parent_node, str):
+            dom_context_prompt += f"html: {parent_node}"
+        elif isinstance(parent_node, dict):
+            if 'tag_name' in parent_node:
+                dom_context_prompt += f"tag_name: {parent_node['tag_name']}, "
+            if 'attributes' in parent_node:
+                dom_context_prompt += f"attributes: {parent_node['attributes']}, "
+            if 'text' in parent_node:
+                dom_context_prompt += f"text: {parent_node['text']}"
+        else:
+            dom_context_prompt += f"{parent_node}"
+    if 'sibling_nodes' in dom_context:
+        sibling_nodes = dom_context['sibling_nodes']
+        dom_context_prompt += ', sibling nodes dom context contains: '
+        index = 0
+        if isinstance(sibling_nodes, str):
+            dom_context_prompt += f"html: {sibling_nodes}"
+        elif isinstance(sibling_nodes, list):
+            for sibling_node in sibling_nodes:
+                dom_context_prompt += f"sibling node {index} contains: "
+                if isinstance(sibling_node, str):
+                    dom_context_prompt += f"html: {sibling_node}"
+                elif isinstance(sibling_node, dict):
+                    dom_context_prompt += f"tag_name: {sibling_node['tag_name']}, "
+                    dom_context_prompt += f"attributes: {sibling_node['attributes']}, "
+                    dom_context_prompt += f"text: {sibling_node['text']}, "
+                else:
+                    dom_context_prompt += f"{sibling_node}"
+                index += 1
+        else:
+            dom_context_prompt += f"{sibling_nodes}"
+    if 'page_title' in dom_context:
+        dom_context_prompt += f", page title: {dom_context['page_title']}"
+
+    return dom_context_prompt
+
+def extract_urls_from_json(json_data: Union[dict, list, str]) -> List[str]:
+    url_pattern = re.compile(r'https?://[^\s]+')
+    urls = []
+
+    def extract_from_value(value):
+        if isinstance(value, str):
+            urls.extend(url_pattern.findall(value))
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                extract_from_value(v)
+        elif isinstance(value, list):
+            for item in value:
+                extract_from_value(item)
+
+    extract_from_value(json_data)
+    return urls
+
+def get_authorization_key(requests):
+    authorization_key = None
+    for request in requests:
+        if 'Authorization' in request['request_headers']:
+            authorization_key = request['request_headers']['Authorization']
+            break
+
+    return authorization_key

@@ -7,6 +7,7 @@ import pprint
 import argparse
 
 from Classes import *
+from Functions import add_script
 
 from seleniumwire import webdriver
 
